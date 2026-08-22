@@ -6,7 +6,9 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
-First public release (retitled `## [0.1.0] — <date>` in the commit that is tagged).
+## [0.1.0] — 2026-08-22
+
+First public release.
 
 ### Added
 - `url-to-pdf`, `html-to-pdf` (file or stdin), `status`, `download`, `version`.
@@ -33,4 +35,5 @@ First public release (retitled `## [0.1.0] — <date>` in the commit that is tag
 - Static binaries for Linux/macOS/Windows with a checksums file, and a
   `FROM scratch` non-root container image.
 
-[Unreleased]: https://github.com/pdfik/cli/commits/main
+[Unreleased]: https://github.com/pdfik/cli/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/pdfik/cli/releases/tag/v0.1.0
