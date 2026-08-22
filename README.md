@@ -1,6 +1,6 @@
 # pdfik CLI
 
-> **Where this code lives:** developed in the PDFik platform monorepo; this tree is its commit `cf6e103`.
+> **Where this code lives:** developed in the PDFik platform monorepo; this tree is its commit `d887997`.
 > Issues and PRs are welcome here; accepted PRs are applied upstream and land with the next sync (see CONTRIBUTING.md).
 
 [![CI](https://github.com/pdfik/cli/actions/workflows/ci.yml/badge.svg)](https://github.com/pdfik/cli/actions/workflows/ci.yml)

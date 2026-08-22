@@ -38,8 +38,14 @@ checksum:
   name_template: checksums.txt
   algorithm: sha256
 
+# Release notes come from CHANGELOG.md: release.yml passes --release-notes, which
+# replaces the generated changelog. (Do NOT set `disable: true` here — that
+# switches the whole changelog stage off, --release-notes included, and the
+# release body ends up empty.) The commit-based changelog below is only what a
+# local `--snapshot` run shows.
 changelog:
-  disable: true # release notes come from CHANGELOG.md (release.yml)
+  use: git
+  sort: asc
 
 release:
   draft: false
