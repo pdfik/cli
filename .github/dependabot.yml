@@ -1,0 +1,20 @@
+# Advisory only: this repository is a mirror synced from the upstream monorepo
+# (see CONTRIBUTING.md), so Dependabot keeps the security alerts but opens no
+# pull requests here — updates are applied upstream.
+version: 2
+updates:
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 0

@@ -1,0 +1,8 @@
+# build output
+/pdfik
+/pdfik.exe
+/dist/
+
+# render results and temp files
+*.pdf
+*.pdf.partial-*

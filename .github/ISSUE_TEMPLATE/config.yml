@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: API documentation
+    url: https://docs.pdfik.net
+    about: Options, limits and error codes of the PDFik API
+  - name: Security issue
+    url: https://github.com/pdfik/cli/blob/main/SECURITY.md
+    about: Please report vulnerabilities privately, not as a public issue
+  - name: Support
+    url: mailto:support@pdfik.net
+    about: Account, billing and rendering questions

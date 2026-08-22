@@ -1,0 +1,6 @@
+dist/
+*.pdf
+*.exe
+.git/
+.github/
+*.md

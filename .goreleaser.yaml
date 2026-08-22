@@ -1,0 +1,46 @@
+# Release automation: pushing a tag `vX.Y.Z` runs release.yml, which builds
+# reproducible binaries for five platforms, attaches them with checksums.txt
+# (the verification surface — nothing is signed) and uses the matching
+# CHANGELOG.md section as the release notes. Try locally with
+# `goreleaser release --snapshot --clean`.
+version: 2
+
+project_name: pdfik
+
+before:
+  hooks:
+    - go mod tidy
+    - go test ./...
+
+builds:
+  - id: pdfik
+    main: ./cmd/pdfik
+    binary: pdfik
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ignore:
+      - goos: windows
+        goarch: arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - id: binaries
+    formats: [binary]
+    name_template: "pdfik-{{ .Os }}-{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  disable: true # release notes come from CHANGELOG.md (release.yml)
+
+release:
+  draft: false
+  prerelease: auto
