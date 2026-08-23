@@ -6,6 +6,13 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] — 2026-08-23
+
+### Added
+- Container images on every release: `ghcr.io/pdfik/cli:<version>`, `:<major.minor>`
+  and `:latest`, for linux/amd64 and linux/arm64, built from the repository
+  Dockerfile by the release workflow.
+
 ## [0.1.0] — 2026-08-22
 
 First public release.

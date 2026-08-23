@@ -1,9 +1,10 @@
-# Container build: the final image is FROM scratch — the static binary plus CA
-# roots, a few megabytes, running as a non-root user.
+# Container image: the final stage is FROM scratch — the static binary plus CA
+# roots, a few megabytes, running as a non-root user. Every release publishes
+# it as ghcr.io/pdfik/cli:<version> (linux/amd64 + linux/arm64; release.yml);
+# `docker build -t pdfik .` builds the same image locally.
 #
-#   docker build -t pdfik .
 #   docker run --rm --user "$(id -u):$(id -g)" -e PDFIK_API_KEY \
-#     -v "$PWD:/work" -w /work pdfik url-to-pdf https://example.com -f example.pdf
+#     -v "$PWD:/work" -w /work ghcr.io/pdfik/cli url-to-pdf https://example.com -f example.pdf
 #
 # --user matters on Linux hosts: the image runs as uid 65532 by default, so
 # without it the output PDF would be owned by that uid. (Alternatively `-o -`

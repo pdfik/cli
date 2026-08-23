@@ -1,6 +1,6 @@
 # pdfik CLI
 
-> **Where this code lives:** developed in the PDFik platform monorepo; this tree is its commit `d887997`.
+> **Where this code lives:** developed in the PDFik platform monorepo; this tree is its commit `87ff87d`.
 > Issues and PRs are welcome here; accepted PRs are applied upstream and land with the next sync (see CONTRIBUTING.md).
 
 [![CI](https://github.com/pdfik/cli/actions/workflows/ci.yml/badge.svg)](https://github.com/pdfik/cli/actions/workflows/ci.yml)
@@ -27,7 +27,10 @@ use the CLI, and `--test` runs are free on every plan.
   ```
 - **Go 1.23 or newer:** `go install github.com/pdfik/cli/cmd/pdfik@latest`
   (pin a version with `@v0.1.0`).
-- **Docker:** `docker build -t pdfik .` — see the notes in the [Dockerfile](Dockerfile).
+- **Docker:** `docker pull ghcr.io/pdfik/cli:0.1.1` — linux/amd64 and linux/arm64;
+  `:0.1` and `:latest` track releases. How to run it (`--user`, mounting the
+  output directory) is in the [Dockerfile](Dockerfile), which also builds
+  locally with `docker build -t pdfik .`.
 - **From source:** `go build -o pdfik ./cmd/pdfik`.
 
 ## Quick start
