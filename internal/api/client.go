@@ -1,10 +1,10 @@
 // Package api is a minimal client for the PDFik REST API.
 //
-// It speaks to the four published endpoints the CLI needs — submit a URL or an
-// HTML document, poll a job, download the result — and nothing else. The full
-// contract lives at https://api.pdfik.net/openapi.json. Standard library only:
-// zero dependencies is part of the tool's promise and keeps the supply chain
-// empty.
+// It speaks to the five published endpoints the CLI needs — submit a URL, an
+// HTML document or an e-invoice XML, poll a job, download the result — and
+// nothing else. The full contract lives at https://api.pdfik.net/openapi.json.
+// Standard library only: zero dependencies is part of the tool's promise and
+// keeps the supply chain empty.
 //
 // Every network call takes a context.Context, so the caller can cancel a poll
 // or a download (the CLI wires Ctrl-C to it). Time is injectable for tests.
@@ -298,6 +298,16 @@ func (c *Client) SubmitHTML(ctx context.Context, html string, opts Submission) (
 		body[k] = v
 	}
 	return c.submit(ctx, "/html-to-pdf", body)
+}
+
+// SubmitEInvoice asks the API to build a Factur-X (PDF/A-3) e-invoice from
+// UN/CEFACT CII XML.
+func (c *Client) SubmitEInvoice(ctx context.Context, xml string, opts Submission) (Job, error) {
+	body := Submission{"xml": xml}
+	for k, v := range opts {
+		body[k] = v
+	}
+	return c.submit(ctx, "/einvoice-to-pdf", body)
 }
 
 // submit posts the body once per attempt under ONE Idempotency-Key, so a

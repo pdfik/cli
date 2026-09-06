@@ -56,6 +56,7 @@ func New(t testing.TB) *Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /url-to-pdf", f.submit)
 	mux.HandleFunc("POST /html-to-pdf", f.submit)
+	mux.HandleFunc("POST /einvoice-to-pdf", f.submit)
 	mux.HandleFunc("GET /jobs/"+JobID, f.poll)
 	mux.HandleFunc("GET /jobs/"+JobID+"/download", f.download)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

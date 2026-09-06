@@ -4,7 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] — 2026-09-06
+
+### Added
+- `einvoice-to-pdf`: build a Factur-X (PDF/A-3) hybrid e-invoice from
+  UN/CEFACT CII XML (file or stdin), with `--profile` (minimum, basicwl,
+  basic, en16931, extended), `--template` for a saved invoice template and
+  `--webhook`; shares the output flags, `--test`, `--timeout` and `-q` with
+  the other commands. Profiles minimum/basicwl print a note that the result
+  is not a legally sufficient e-invoice.
 
 ## [0.1.1] — 2026-08-23
 
@@ -42,5 +50,5 @@ First public release.
 - Static binaries for Linux/macOS/Windows with a checksums file, and a
   `FROM scratch` non-root container image.
 
-[Unreleased]: https://github.com/pdfik/cli/compare/v0.1.0...HEAD
+[0.2.0]: https://github.com/pdfik/cli/compare/v0.1.1...v0.2.0
 [0.1.0]: https://github.com/pdfik/cli/releases/tag/v0.1.0

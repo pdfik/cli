@@ -1,6 +1,6 @@
 # pdfik CLI
 
-> **Where this code lives:** developed in the PDFik platform monorepo; this tree is its commit `87ff87d`.
+> **Where this code lives:** developed in the PDFik platform monorepo; this tree is its commit `13ec775`.
 > Issues and PRs are welcome here; accepted PRs are applied upstream and land with the next sync (see CONTRIBUTING.md).
 
 [![CI](https://github.com/pdfik/cli/actions/workflows/ci.yml/badge.svg)](https://github.com/pdfik/cli/actions/workflows/ci.yml)
@@ -43,6 +43,7 @@ pdfik url-to-pdf https://example.com -o ./pdfs -f example.pdf   # -o directory, 
 pdfik html-to-pdf invoice.html -f invoice.pdf --format A4 --margin 10mm --margin-top 25mm
 pdfik url-to-pdf https://example.com --test                     # free: full pipeline, sample PDF
 pdfik url-to-pdf https://example.com -o -  > example.pdf        # stream the PDF to stdout
+pdfik einvoice-to-pdf invoice.xml --profile en16931             # Factur-X e-invoice (PDF/A-3)
 pdfik status   <job-id>
 pdfik download <job-id> -o ./pdfs                               # fetch a finished job later
 ```
@@ -59,27 +60,55 @@ redirect from cmd.exe / PowerShell 7+.
 ## Flags
 
 Flags may appear before or after the positional argument. `url-to-pdf`,
-`html-to-pdf` and `download` share the output flags; `status` takes only the
-connection flags.
+`html-to-pdf`, `einvoice-to-pdf` and `download` share the output flags;
+`status` takes only the connection flags. The page-layout flags apply to
+`url-to-pdf` and `html-to-pdf` only — an e-invoice's layout comes from its
+template (see [E-invoicing](#e-invoicing-factur-x)).
 
 | Flag | Applies to | Meaning | Default |
 | :-- | :-- | :-- | :-- |
-| `-o`, `--output DIR` | url-to-pdf, html-to-pdf, download | output **directory** (created if missing); `-` streams the PDF to stdout | current directory |
-| `-f`, `--file-name NAME` | url-to-pdf, html-to-pdf, download | file name inside the output directory (bare name, no path) | `<job-id>.pdf` |
+| `-o`, `--output DIR` | url-to-pdf, html-to-pdf, einvoice-to-pdf, download | output **directory** (created if missing); `-` streams the PDF to stdout | current directory |
+| `-f`, `--file-name NAME` | url-to-pdf, html-to-pdf, einvoice-to-pdf, download | file name inside the output directory (bare name, no path) | `<job-id>.pdf` |
 | `--format SIZE` | url-to-pdf, html-to-pdf | page format, case-insensitive: `A0`–`A6`, `Letter`, `Legal`, `Tabloid`, `Ledger` | `A4` |
 | `--landscape` | url-to-pdf, html-to-pdf | landscape orientation | portrait |
 | `--margin VALUE` | url-to-pdf, html-to-pdf | page margins, each **with a unit** (`mm`, `cm`, `in`, `px`): one value for all sides, or CSS shorthand `top,right,bottom,left` (`--margin 10mm,1cm,0.5in,20px`; 2 values = vertical,horizontal; 3 = top,horizontal,bottom) | renderer default |
 | `--margin-top`, `--margin-right`, `--margin-bottom`, `--margin-left VALUE` | url-to-pdf, html-to-pdf | one side, same units; overrides `--margin` for that side | renderer default |
 | `--no-background` | url-to-pdf, html-to-pdf | skip CSS backgrounds | backgrounds print |
-| `--test` | url-to-pdf, html-to-pdf | free test run: full pipeline, sample PDF, no quota used | off |
-| `--timeout DUR` | url-to-pdf, html-to-pdf | how long to wait for rendering (`90s`, `3m`) | `3m` |
-| `-q`, `--quiet` | url-to-pdf, html-to-pdf, download | no progress lines; warnings and errors still print | off |
+| `--profile NAME` | einvoice-to-pdf | Factur-X conformance profile the XML declares: `minimum`, `basicwl`, `basic`, `en16931`, `extended` | `en16931` |
+| `--template ID` | einvoice-to-pdf | id of a saved invoice template (Dashboard → E-Invoice) | the account default template |
+| `--webhook URL` | einvoice-to-pdf | callback URL that receives a POST with the job outcome | none |
+| `--test` | url-to-pdf, html-to-pdf, einvoice-to-pdf | free test run: full pipeline, sample PDF, no quota used | off |
+| `--timeout DUR` | url-to-pdf, html-to-pdf, einvoice-to-pdf | how long to wait for rendering (`90s`, `3m`) | `3m` |
+| `-q`, `--quiet` | url-to-pdf, html-to-pdf, einvoice-to-pdf, download | no progress lines; warnings and errors still print | off |
 | `--api-key KEY` | all | API key (prefer `PDFIK_API_KEY` — flag values are visible to other processes and shell history) | `$PDFIK_API_KEY` |
 | `--api-url URL` | all | API base URL (`https://` only, loopback excepted) | `$PDFIK_API_URL` or `https://api.pdfik.net` |
 | `-h`, `--help` | all | usage | |
 
 `pdfik wkhtmltopdf` takes wkhtmltopdf's own flags and positional `<input> <output.pdf>`
 instead — see [COMPATIBILITY.md](COMPATIBILITY.md).
+
+## E-invoicing (Factur-X)
+
+```bash
+pdfik einvoice-to-pdf invoice.xml --profile en16931 -f invoice.pdf
+pdfik einvoice-to-pdf invoice.xml --template 3e1c…d42 --webhook https://example.com/hooks/pdf
+```
+
+`einvoice-to-pdf` takes UN/CEFACT Cross-Industry-Invoice XML (UTF-8, up to
+1 MB; `-` reads stdin), builds the human-readable invoice from a block
+template — a saved one via `--template`, otherwise the account default — and
+returns a PDF/A-3 file with the XML embedded as `factur-x.xml` (a Factur-X /
+ZUGFeRD hybrid e-invoice). Invoices (TypeCode 380) and credit notes (381) are
+supported. The XML is validated against the official XSD of the declared
+`--profile` before anything is charged; the output is validated with veraPDF
+and Mustangproject. Schema-valid does not mean tax-compliant — the invoice
+content remains your responsibility.
+
+Available on every plan, Free included — the output is the same clean PDF/A-3.
+Profiles `minimum` and `basicwl` embed accompanying data only and are **not**
+a legally sufficient e-invoice — use `basic`, `en16931` or `extended` for a
+full invoice. Templates are created in the dashboard's E-Invoice constructor
+(logo, blocks, live preview).
 
 ## Environment
 
