@@ -74,12 +74,15 @@ func TestSubmitWaitDownload(t *testing.T) {
 		t.Fatalf("unexpected status: %+v", st)
 	}
 	var buf bytes.Buffer
-	n, err := c.Download(ctx, job.JobID, &buf)
+	n, contentType, err := c.Download(ctx, job.JobID, &buf)
 	if err != nil {
 		t.Fatalf("download: %v", err)
 	}
 	if buf.String() != apitest.PDF || n != int64(len(apitest.PDF)) {
 		t.Fatalf("download mismatch: %q (%d bytes)", buf.String(), n)
+	}
+	if contentType != "application/pdf" {
+		t.Fatalf("the response Content-Type must be passed on, got %q", contentType)
 	}
 }
 
@@ -282,7 +285,7 @@ func TestDownloadAbortsWhenTheStreamStalls(t *testing.T) {
 	c, _ := newTestClient(t, f.URL, WithStallTimeout(200*time.Millisecond))
 	start := time.Now()
 	var buf bytes.Buffer
-	_, err := c.Download(context.Background(), apitest.JobID, &buf)
+	_, _, err := c.Download(context.Background(), apitest.JobID, &buf)
 	var de *DownloadError
 	if !errors.As(err, &de) || !strings.Contains(err.Error(), "no data for 200ms") {
 		t.Fatalf("expected a stall DownloadError, got %v", err)
@@ -306,7 +309,7 @@ func TestDownloadToleratesSlowButLiveStream(t *testing.T) {
 	}
 	c, _ := newTestClient(t, f.URL, WithStallTimeout(2*time.Second))
 	var buf bytes.Buffer
-	n, err := c.Download(context.Background(), apitest.JobID, &buf)
+	n, _, err := c.Download(context.Background(), apitest.JobID, &buf)
 	if err != nil || n != 10 {
 		t.Fatalf("a live stream must not be cut: n=%d err=%v", n, err)
 	}
@@ -318,7 +321,7 @@ func TestDownloadDoesNotTimeAStalledWriter(t *testing.T) {
 	f := apitest.New(t)
 	c, _ := newTestClient(t, f.URL, WithStallTimeout(100*time.Millisecond))
 	slow := &slowWriter{delay: 300 * time.Millisecond}
-	if _, err := c.Download(context.Background(), apitest.JobID, slow); err != nil {
+	if _, _, err := c.Download(context.Background(), apitest.JobID, slow); err != nil {
 		t.Fatalf("slow writer must not abort the download: %v", err)
 	}
 }
@@ -343,7 +346,7 @@ func TestDownloadRetriesBusyButNotExhausted(t *testing.T) {
 	}
 	c, clock := newTestClient(t, f.URL)
 	var buf bytes.Buffer
-	if _, err := c.Download(context.Background(), apitest.JobID, &buf); err != nil {
+	if _, _, err := c.Download(context.Background(), apitest.JobID, &buf); err != nil {
 		t.Fatalf("download-busy must be retried: %v", err)
 	}
 	if calls.Load() != 2 || len(clock.sleeps) != 1 || clock.sleeps[0] != 2*time.Second {
@@ -357,7 +360,7 @@ func TestDownloadRetriesBusyButNotExhausted(t *testing.T) {
 		w.Write([]byte(`{"type":"https://docs.pdfik.net/error-codes#download-attempts-exhausted","title":"Too Many Requests","status":429,"detail":"all attempts used"}`))
 	}
 	c2, clock2 := newTestClient(t, f2.URL)
-	_, err := c2.Download(context.Background(), apitest.JobID, &buf)
+	_, _, err := c2.Download(context.Background(), apitest.JobID, &buf)
 	var apiErr *Error
 	if !errors.As(err, &apiErr) || !apiErr.IsCase("download-attempts-exhausted") || len(clock2.sleeps) != 0 || f2.Downloads() != 1 {
 		t.Fatalf("an exhausted attempt counter must not be retried: err=%v sleeps=%v downloads=%d", err, clock2.sleeps, f2.Downloads())
@@ -372,7 +375,7 @@ func TestDownloadReportsTruncatedStream(t *testing.T) {
 	}
 	c, _ := newTestClient(t, f.URL)
 	var buf bytes.Buffer
-	_, err := c.Download(context.Background(), apitest.JobID, &buf)
+	_, _, err := c.Download(context.Background(), apitest.JobID, &buf)
 	var de *DownloadError
 	if !errors.As(err, &de) || de.Bytes != 10 {
 		t.Fatalf("expected a truncation DownloadError after 10 bytes, got %v", err)
@@ -402,14 +405,14 @@ func TestRedirectPolicyStripsKeyOffOrigin(t *testing.T) {
 
 	c, _ := newTestClient(t, origin.URL)
 	var buf bytes.Buffer
-	if _, err := c.Download(context.Background(), "j1", &buf); err != nil {
+	if _, _, err := c.Download(context.Background(), "j1", &buf); err != nil {
 		t.Fatal(err)
 	}
 	if foreignKey != "" || foreignUA == "" {
 		t.Fatalf("X-API-Key leaked to a foreign host (%q) or request never arrived", foreignKey)
 	}
 	buf.Reset()
-	if _, err := c.Download(context.Background(), "j2", &buf); err != nil {
+	if _, _, err := c.Download(context.Background(), "j2", &buf); err != nil {
 		t.Fatal(err)
 	}
 	if sameHostKey != "sk_live_test" {
@@ -607,7 +610,7 @@ func TestDownloadRetriesServiceUnavailable(t *testing.T) {
 	}
 	c, clock := newTestClient(t, f.URL)
 	var buf bytes.Buffer
-	if _, err := c.Download(context.Background(), apitest.JobID, &buf); err != nil {
+	if _, _, err := c.Download(context.Background(), apitest.JobID, &buf); err != nil {
 		t.Fatalf("503 must be retried up to the cap: %v", err)
 	}
 	if calls.Load() != 3 || len(clock.sleeps) != 2 {
@@ -675,5 +678,84 @@ func TestLongErrorTextIsCutOnRuneBoundary(t *testing.T) {
 	_, err := c.Status(context.Background(), "j1")
 	if err == nil || !utf8.ValidString(err.Error()) || !strings.Contains(err.Error(), "…") {
 		t.Fatalf("expected a valid, capped message, got %q", err)
+	}
+}
+
+func TestSubmitWaitsOutARateLimitWithTheSameKey(t *testing.T) {
+	f := apitest.New(t)
+	f.SubmitStatuses = []int{429, 429, 202}
+	c, clock := newTestClient(t, f.URL)
+	job, err := c.SubmitURL(context.Background(), "https://example.com", nil)
+	if err != nil || job.JobID != apitest.JobID {
+		t.Fatalf("a 429 rate limit must be waited out: %v", err)
+	}
+	if f.Submits() != 3 {
+		t.Fatalf("expected 3 submits, got %d", f.Submits())
+	}
+	hs := f.SubmitHeaders()
+	if hs[0].Get("Idempotency-Key") == "" || hs[0].Get("Idempotency-Key") != hs[2].Get("Idempotency-Key") {
+		t.Fatalf("throttled resends must reuse the idempotency key")
+	}
+	if len(clock.sleeps) != 2 || clock.sleeps[0] != 2*time.Second { // the fake sends Retry-After: 2
+		t.Fatalf("expected two Retry-After sleeps, got %v", clock.sleeps)
+	}
+}
+
+func TestSubmitDoesNotWaitOutAQuota429(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "1")
+		w.WriteHeader(429)
+		w.Write([]byte(`{"type":"https://docs.pdfik.net/error-codes#quota-bytes-exceeded","title":"Quota","status":429,"error":"BYTE_QUOTA_EXCEEDED","detail":"monthly volume used up"}`))
+	}))
+	defer srv.Close()
+	c, clock := newTestClient(t, srv.URL)
+	_, err := c.SubmitURL(context.Background(), "https://example.com", nil)
+	var apiErr *Error
+	if !errors.As(err, &apiErr) || apiErr.Status != 429 || len(clock.sleeps) != 0 {
+		t.Fatalf("a quota 429 does not clear by waiting — expected it at once, got %v / sleeps %v", err, clock.sleeps)
+	}
+}
+
+func TestStatusPatientWaitsOutAThrottle(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Retry-After", "3")
+			w.WriteHeader(429)
+			w.Write([]byte(`{"error":"RATE_LIMIT_EXCEEDED","detail":"Too many requests. Please try again later.","retry_after_seconds":3}`))
+			return
+		}
+		w.Write([]byte(`{"status":"done"}`))
+	}))
+	defer srv.Close()
+	c, clock := newTestClient(t, srv.URL)
+	st, err := c.StatusPatient(context.Background(), apitest.JobID)
+	if err != nil || st.Status != StatusDone || calls != 2 {
+		t.Fatalf("status must survive one 429: %v %+v calls=%d", err, st, calls)
+	}
+	if len(clock.sleeps) != 1 || clock.sleeps[0] != 3*time.Second {
+		t.Fatalf("expected one 3s Retry-After sleep, got %v", clock.sleeps)
+	}
+}
+
+func TestDownloadWaitsOutTheRequestRateLimit(t *testing.T) {
+	calls := 0
+	f := apitest.New(t)
+	f.DownloadHandler = func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Retry-After", "1")
+			w.WriteHeader(429)
+			w.Write([]byte(`{"error":"RATE_LIMIT_EXCEEDED","detail":"Too many requests. Please try again later."}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/pdf")
+		w.Write([]byte(apitest.PDF))
+	}
+	c, _ := newTestClient(t, f.URL)
+	var buf bytes.Buffer
+	if _, _, err := c.Download(context.Background(), apitest.JobID, &buf); err != nil || calls != 2 {
+		t.Fatalf("download must survive the request limiter's 429: %v calls=%d", err, calls)
 	}
 }

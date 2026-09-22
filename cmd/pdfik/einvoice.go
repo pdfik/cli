@@ -115,6 +115,6 @@ func cmdEInvoice(ctx context.Context, args []string, std streams) error {
 		return err
 	}
 	return renderAndSave(ctx, client, submit, func(jobID string) string {
-		return outputPath(ef.output, ef.fileName, jobID)
+		return outputPath(ef.output, ef.fileName, jobID, ".pdf")
 	}, runOptions{timeout: ef.timeout, quiet: ef.quiet, test: ef.test}, std)
 }

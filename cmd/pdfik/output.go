@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,13 +24,27 @@ var (
 	stdoutIsTerminal = isTerminal
 )
 
+// checkDestination settles where the output goes before anything is
+// submitted. With --deliver-url the server uploads the output straight to the
+// caller's own storage and nothing is downloaded, so a local destination is
+// refused rather than silently ignored.
+func checkDestination(deliverURL, dir, fileName string, stdout io.Writer) error {
+	if deliverURL == "" {
+		return checkOutput(dir, fileName, stdout)
+	}
+	if dir != "" || fileName != "" {
+		return usagef("-o/--output and -f/--file-name cannot be combined with --deliver-url — the output is uploaded to your storage and nothing is downloaded")
+	}
+	return nil
+}
+
 // checkOutput validates -o/-f before anything is submitted, in an order that
 // never leaves side effects behind a refusal: the file name and the terminal
 // guard first, the directory (which may be created) last.
 func checkOutput(dir, fileName string, stdout io.Writer) error {
 	if dir == stdoutMarker {
 		if stdoutIsTerminal(stdout) {
-			return usagef("refusing to write PDF bytes to a terminal — redirect stdout or use -o DIR")
+			return usagef("refusing to write binary output to a terminal — redirect stdout or use -o DIR")
 		}
 		return nil
 	}
@@ -37,6 +52,22 @@ func checkOutput(dir, fileName string, stdout io.Writer) error {
 		return err
 	}
 	return prepareOutputDir(dir, "-o/--output")
+}
+
+// outputExtensions are the file extensions the commands produce: .pdf for the
+// PDF commands, .png/.jpg for the screenshot commands.
+var outputExtensions = []string{".pdf", ".png", ".jpg", ".jpeg"}
+
+// looksLikeFileName reports whether a directory argument was actually given an
+// output file name (the old `-o x.pdf` habit, and its .png/.jpg siblings).
+func looksLikeFileName(dir string) bool {
+	lower := strings.ToLower(dir)
+	for _, ext := range outputExtensions {
+		if strings.HasSuffix(lower, ext) {
+			return true
+		}
+	}
+	return false
 }
 
 // prepareOutputDir makes sure the output directory exists. "" means the
@@ -56,7 +87,7 @@ func prepareOutputDir(dir, label string) error {
 		return usagef("%s %q is a file; it must be a directory%s", label, dir, hint)
 	case err == nil:
 		return nil
-	case strings.HasSuffix(strings.ToLower(dir), ".pdf"):
+	case looksLikeFileName(dir):
 		return usagef("%s %q looks like a file name; it must be a directory%s", label, dir, hint)
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -74,9 +105,10 @@ func checkFileName(name string) error {
 }
 
 // outputPath is the final destination for a job: <dir>/<name>, with
-// <job-id>.pdf as the default name — unique per run and the same id that
-// `pdfik download` takes.
-func outputPath(dir, fileName, jobID string) string {
+// <job-id><ext> as the default name — unique per run and the same id that
+// `pdfik download` takes. ext is the command's output kind: ".pdf" for the
+// PDF commands, ".png"/".jpg" for the screenshot commands.
+func outputPath(dir, fileName, jobID, ext string) string {
 	if dir == stdoutMarker {
 		return stdoutMarker
 	}
@@ -84,25 +116,46 @@ func outputPath(dir, fileName, jobID string) string {
 		dir = "."
 	}
 	if fileName == "" {
-		fileName = jobID + ".pdf"
+		fileName = jobID + ext
 	}
 	return filepath.Join(dir, fileName)
 }
 
-// saveJob downloads the finished PDF to a file or, for "-", to stdout, and
-// returns where it went.
+// extForMedia maps a download's Content-Type to the file extension of that
+// output kind; "" for a type the CLI does not know.
+func extForMedia(contentType string) string {
+	mediaType, _, _ := mime.ParseMediaType(contentType)
+	switch mediaType {
+	case "application/pdf":
+		return ".pdf"
+	case "image/png":
+		return ".png"
+	case "image/jpeg":
+		return ".jpg"
+	}
+	return ""
+}
+
+// saveJob downloads the finished output to a file or, for "-", to stdout, and
+// returns where it went. ext names the default extension when output turns
+// out to be a directory.
+//
+// autoExt means the file name is the CLI's own <job-id><ext>, not the user's:
+// the extension then follows the download's Content-Type. `pdfik download`
+// cannot know the job's kind from its id, and naming a screenshot .pdf would
+// hand the user a file no viewer opens.
 //
 // File downloads stream into a temp file next to the destination and rename
-// over it only on success: a failed run can never truncate or delete a PDF
+// over it only on success: a failed run can never truncate or delete a file
 // from an earlier run, an interrupted run leaves the previous file intact,
 // and the same-directory rename is atomic. The temp file is closed BEFORE
 // removal — Windows cannot delete an open file.
-func saveJob(ctx context.Context, client *api.Client, jobID, output string, stdout io.Writer) (string, error) {
+func saveJob(ctx context.Context, client *api.Client, jobID, output, ext string, autoExt bool, stdout io.Writer) (string, error) {
 	if output == stdoutMarker {
 		if stdoutIsTerminal(stdout) { // backstop; checkOutput refused this before the submit
-			return "", usagef("refusing to write PDF bytes to a terminal — redirect stdout or use -o DIR")
+			return "", usagef("refusing to write binary output to a terminal — redirect stdout or use -o DIR")
 		}
-		if _, err := client.Download(ctx, jobID, stdout); err != nil {
+		if _, _, err := client.Download(ctx, jobID, stdout); err != nil {
 			return "", err
 		}
 		return stdoutMarker, nil
@@ -110,13 +163,15 @@ func saveJob(ctx context.Context, client *api.Client, jobID, output string, stdo
 	// wkhtmltopdf mode passes its positional <output> straight here; an existing
 	// directory means "name the file after the job id inside it".
 	if fi, err := os.Stat(output); err == nil && fi.IsDir() {
-		output = filepath.Join(output, jobID+".pdf")
+		output = filepath.Join(output, jobID+ext)
+		autoExt = true
 	}
 	tmp, err := createPartial(output)
 	if err != nil {
 		return "", err
 	}
-	if _, err := client.Download(ctx, jobID, tmp); err != nil {
+	_, contentType, err := client.Download(ctx, jobID, tmp)
+	if err != nil {
 		tmp.Close()
 		os.Remove(tmp.Name())
 		return "", err
@@ -125,10 +180,17 @@ func saveJob(ctx context.Context, client *api.Client, jobID, output string, stdo
 		os.Remove(tmp.Name())
 		return "", err
 	}
+	if autoExt {
+		// The temp file stays where it is: same directory, so the rename below
+		// is still atomic.
+		if actual := extForMedia(contentType); actual != "" && actual != ext && strings.HasSuffix(output, ext) {
+			output = strings.TrimSuffix(output, ext) + actual
+		}
+	}
 	if err := renameFile(tmp.Name(), output); err != nil {
 		// Keep the temp file: the render is paid for and complete; only the
 		// final rename failed (target open in a viewer, permissions…).
-		return "", fmt.Errorf("could not write %s (%v) — is it open in another program? The PDF was kept at %s", output, underlying(err), tmp.Name())
+		return "", fmt.Errorf("could not write %s (%v) — is it open in another program? The output was kept at %s", output, underlying(err), tmp.Name())
 	}
 	return output, nil
 }

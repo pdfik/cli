@@ -15,13 +15,14 @@ import (
 const defaultTimeout = 3 * time.Minute
 
 type convertFlags struct {
-	conn     connFlags
-	page     pageOptions
-	output   string
-	fileName string
-	test     bool
-	quiet    bool
-	timeout  time.Duration
+	conn       connFlags
+	page       pageOptions
+	output     string
+	fileName   string
+	deliverURL string
+	test       bool
+	quiet      bool
+	timeout    time.Duration
 }
 
 func parseConvertFlags(cmd string, args []string) (convertFlags, []string, error) {
@@ -38,6 +39,7 @@ func parseConvertFlags(cmd string, args []string) (convertFlags, []string, error
 		fs.StringVar(&cf.page.marginSides[i], "margin-"+side, "", "")
 	}
 	fs.BoolVar(&cf.page.noBackground, "no-background", false, "")
+	fs.StringVar(&cf.deliverURL, "deliver-url", "", "")
 	fs.BoolVar(&cf.test, "test", false, "")
 	fs.BoolVar(&cf.quiet, "q", false, "")
 	fs.BoolVar(&cf.quiet, "quiet", false, "")
@@ -45,6 +47,24 @@ func parseConvertFlags(cmd string, args []string) (convertFlags, []string, error
 	cf.conn.register(fs)
 	rest, err := parseInterleaved(fs, args)
 	return cf, rest, err
+}
+
+// deliveryOption is the request's `delivery` object for --deliver-url. The API
+// supports exactly one mode in v1: the caller's presigned PUT URL.
+func deliveryOption(url string) map[string]any {
+	return map[string]any{"mode": "presigned_put", "url": url}
+}
+
+// deliveredLocation is what the CLI reports for a delivered job: the
+// --deliver-url value with the query string (the signature) stripped. It comes
+// from the flag the caller just typed, never from the API — the job.finished
+// webhook deliberately carries no address at all, because a presigned URL is a
+// credential and PDFik does not record it.
+func deliveredLocation(deliverURL string) string {
+	if i := strings.IndexByte(deliverURL, '?'); i >= 0 {
+		return deliverURL[:i]
+	}
+	return deliverURL
 }
 
 // cmdConvert implements url-to-pdf and html-to-pdf.
@@ -73,11 +93,14 @@ func cmdConvert(ctx context.Context, cmd string, args []string, std streams) err
 	if cf.test {
 		body["test"] = true
 	}
+	if cf.deliverURL != "" {
+		body["delivery"] = deliveryOption(cf.deliverURL)
+	}
 
 	// Settle the destination before submitting: a bad -o/-f must not cost a
 	// render. Checks that cannot fail later come first, so a refused run never
 	// leaves a freshly created directory behind.
-	if err := checkOutput(cf.output, cf.fileName, std.out); err != nil {
+	if err := checkDestination(cf.deliverURL, cf.output, cf.fileName, std.out); err != nil {
 		return err
 	}
 
@@ -103,8 +126,8 @@ func cmdConvert(ctx context.Context, cmd string, args []string, std streams) err
 		return err
 	}
 	return renderAndSave(ctx, client, submit, func(jobID string) string {
-		return outputPath(cf.output, cf.fileName, jobID)
-	}, runOptions{timeout: cf.timeout, quiet: cf.quiet, test: cf.test}, std)
+		return outputPath(cf.output, cf.fileName, jobID, ".pdf")
+	}, runOptions{timeout: cf.timeout, quiet: cf.quiet, test: cf.test, deliverURL: cf.deliverURL}, std)
 }
 
 // runOptions are the knobs of the submit → wait → save pipeline.
@@ -112,31 +135,58 @@ type runOptions struct {
 	timeout time.Duration
 	quiet   bool
 	test    bool
+	// ext is the command's output extension (".pdf" when empty; ".png"/".jpg"
+	// for the screenshot commands).
+	ext string
+	// deliverURL, when set, means the server uploads the output straight to
+	// the caller's storage: the download step is skipped entirely (the API
+	// answers 404 for such jobs) and the delivered location is reported.
+	deliverURL string
 }
 
-// renderAndSave is the one pipeline behind url-to-pdf, html-to-pdf and the
+// renderAndSave is the one pipeline behind every rendering command and the
 // wkhtmltopdf mode: submit, report the job id, wait, download, summarise.
 // outputFor resolves the destination once the job id is known.
 func renderAndSave(ctx context.Context, client *api.Client,
 	submit func(context.Context, *api.Client) (api.Job, error),
 	outputFor func(jobID string) string, opts runOptions, std streams) error {
 
+	ext := opts.ext
+	if ext == "" {
+		ext = ".pdf"
+	}
 	job, err := submit(ctx, client)
 	if err != nil {
 		return err
 	}
 	suffix := ""
 	if opts.test {
-		suffix = " (test mode — free, returns a sample PDF)"
+		sample := "PDF"
+		if ext != ".pdf" {
+			sample = "image"
+		}
+		suffix = " (test mode — free, returns a sample " + sample + ")"
 	}
 	progress(std.err, opts.quiet, "job %s queued%s", job.JobID, suffix)
 
 	started := time.Now()
 	st, err := client.Wait(ctx, job.JobID, opts.timeout)
 	if err != nil {
-		return withJobHint(err, job.JobID)
+		err = withJobHint(err, job.JobID)
+		if opts.deliverURL != "" {
+			err = deliveryHint(err, job.JobID, deliveredLocation(opts.deliverURL))
+		}
+		return err
 	}
-	saved, err := saveJob(ctx, client, job.JobID, outputFor(job.JobID), std.out)
+	if opts.deliverURL != "" {
+		// The output went straight to the caller's storage; there is nothing
+		// to download here. The location is the one the caller asked for,
+		// minus the presigned query string.
+		progress(std.err, opts.quiet, "job %s delivered: %s%s",
+			job.JobID, deliveredLocation(opts.deliverURL), savedSummary(st, "", time.Since(started)))
+		return nil
+	}
+	saved, err := saveJob(ctx, client, job.JobID, outputFor(job.JobID), ext, false, std.out)
 	if err != nil {
 		return withJobHint(err, job.JobID)
 	}
@@ -158,6 +208,37 @@ func withJobHint(err error, jobID string) error {
 		return fmt.Errorf("%w (job %s)", err, jobID)
 	}
 	return err
+}
+
+// deliveryHintError is a wait failure of a --deliver-url run with the
+// "download it later" advice rewritten: the API answers 404
+// output-delivered-externally for such jobs, because the output lands in the
+// caller's storage. Unwrap keeps report()'s exit codes (NotFinishedError → 4,
+// context.Canceled → 130).
+type deliveryHintError struct {
+	msg   string
+	cause error
+}
+
+func (e *deliveryHintError) Error() string { return e.msg }
+func (e *deliveryHintError) Unwrap() error { return e.cause }
+
+// deliveryHint rewrites the three recovery hints a wait failure can carry —
+// the timeout (api.NotFinishedError), the repeated poll failure (api.Client.Wait)
+// and the interruption (withJobHint) — to point at `pdfik status` and at the
+// delivered location instead of `pdfik download`. An error without such a
+// hint (a render failure, a rejected key) is returned unchanged.
+func deliveryHint(err error, jobID, location string) error {
+	orig := err.Error()
+	msg := strings.ReplaceAll(orig, " && pdfik download "+jobID, "")
+	msg = strings.ReplaceAll(msg, "fetch it later with: pdfik download "+jobID, "check it later with: pdfik status "+jobID)
+	if msg == orig {
+		return err
+	}
+	return &deliveryHintError{
+		msg:   msg + "\n  the output goes to " + location + " when the job finishes — nothing is stored on PDFik's side to download",
+		cause: err,
+	}
 }
 
 // savedSummary renders the useful facts the API reports about a finished job

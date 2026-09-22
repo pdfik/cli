@@ -41,7 +41,7 @@ func cmdStatus(ctx context.Context, args []string, std streams) error {
 	if err != nil {
 		return err
 	}
-	st, err := client.Status(ctx, jobID)
+	st, err := client.StatusPatient(ctx, jobID)
 	if err != nil {
 		return err
 	}
@@ -60,8 +60,9 @@ func cmdStatus(ctx context.Context, args []string, std streams) error {
 }
 
 // cmdDownload fetches a finished job by id — the recovery path every wait
-// error points at. The status is checked first so a queued or failed job does
-// not consume one of the file's three download attempts.
+// error points at (except for --deliver-url runs, whose output is never
+// stored on PDFik's side). The status is checked first so a queued or failed
+// job does not consume one of the file's three download attempts.
 func cmdDownload(ctx context.Context, args []string, std streams) error {
 	var conn connFlags
 	var output, fileName string
@@ -104,7 +105,9 @@ func cmdDownload(ctx context.Context, args []string, std streams) error {
 	default:
 		return &api.NotFinishedError{JobID: jobID, Status: st.Status}
 	}
-	saved, err := saveJob(ctx, client, jobID, outputPath(output, fileName, jobID), std.out)
+	// Without -f the extension follows the job's output kind (the download's
+	// Content-Type): a screenshot job lands as <job-id>.png / .jpg.
+	saved, err := saveJob(ctx, client, jobID, outputPath(output, fileName, jobID, ".pdf"), ".pdf", fileName == "", std.out)
 	if err != nil {
 		return err
 	}

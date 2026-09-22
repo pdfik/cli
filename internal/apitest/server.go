@@ -17,6 +17,9 @@ const JobID = "job-1"
 // PDF is the download body.
 const PDF = "%PDF-1.7 fake"
 
+// PNG is the download body when DownloadContentType is "image/png".
+const PNG = "\x89PNG\r\n\x1a\n fake"
+
 // Server is a configurable fake API. Configure the exported fields before the
 // first request; read the counters through the accessor methods (handlers
 // run in server goroutines).
@@ -39,6 +42,10 @@ type Server struct {
 	FinalStatus map[string]any
 	// DownloadHandler replaces the download endpoint when set.
 	DownloadHandler http.HandlerFunc
+	// DownloadContentType is the download's media type, as the API sends it
+	// per job kind ("" = application/pdf). "image/png" also switches the body
+	// to PNG — a screenshot job.
+	DownloadContentType string
 
 	srv       *httptest.Server
 	mu        sync.Mutex
@@ -56,6 +63,9 @@ func New(t testing.TB) *Server {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /url-to-pdf", f.submit)
 	mux.HandleFunc("POST /html-to-pdf", f.submit)
+	mux.HandleFunc("POST /markdown-to-pdf", f.submit)
+	mux.HandleFunc("POST /url-to-image", f.submit)
+	mux.HandleFunc("POST /html-to-image", f.submit)
 	mux.HandleFunc("POST /einvoice-to-pdf", f.submit)
 	mux.HandleFunc("GET /jobs/"+JobID, f.poll)
 	mux.HandleFunc("GET /jobs/"+JobID+"/download", f.download)
@@ -97,6 +107,11 @@ func (f *Server) submit(w http.ResponseWriter, r *http.Request) {
 	f.submits++
 	f.mu.Unlock()
 	if n < len(f.SubmitStatuses) && f.SubmitStatuses[n] != http.StatusAccepted {
+		if f.SubmitStatuses[n] == http.StatusTooManyRequests {
+			w.Header().Set("Retry-After", "2")
+			problem(w, http.StatusTooManyRequests, "RATE_LIMIT_EXCEEDED", "Too many requests")
+			return
+		}
 		problem(w, f.SubmitStatuses[n], "UPSTREAM", "submit failed")
 		return
 	}
@@ -147,8 +162,15 @@ func (f *Server) download(w http.ResponseWriter, r *http.Request) {
 		f.DownloadHandler(w, r)
 		return
 	}
-	w.Header().Set("Content-Type", "application/pdf")
-	w.Write([]byte(PDF))
+	contentType, body := "application/pdf", PDF
+	if f.DownloadContentType != "" {
+		contentType = f.DownloadContentType
+	}
+	if contentType == "image/png" {
+		body = PNG
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Write([]byte(body))
 }
 
 // LastBody is the most recent submission body.

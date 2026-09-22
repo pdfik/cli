@@ -1,6 +1,6 @@
 # pdfik CLI
 
-> **Where this code lives:** developed in the PDFik platform monorepo; this tree is its commit `13ec775`.
+> **Where this code lives:** developed in the PDFik platform monorepo; this tree is its commit `b3b9cc7`.
 > Issues and PRs are welcome here; accepted PRs are applied upstream and land with the next sync (see CONTRIBUTING.md).
 
 [![CI](https://github.com/pdfik/cli/actions/workflows/ci.yml/badge.svg)](https://github.com/pdfik/cli/actions/workflows/ci.yml)
@@ -8,8 +8,9 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 wkhtmltopdf-compatible command-line client for [PDFik](https://pdfik.net) —
-render URLs and HTML to PDF through the cloud API. One static binary, standard
-library only, no dependencies; also a few-megabyte container image.
+render URLs, HTML and Markdown to PDF, or capture URLs and HTML as PNG/JPEG
+screenshots, through the cloud API. One static binary, standard library only,
+no dependencies; also a few-megabyte container image.
 
 An API key is required: the [Free plan](https://pdfik.net/pricing) is enough to
 use the CLI, and `--test` runs are free on every plan.
@@ -27,7 +28,7 @@ use the CLI, and `--test` runs are free on every plan.
   ```
 - **Go 1.23 or newer:** `go install github.com/pdfik/cli/cmd/pdfik@latest`
   (pin a version with `@v0.1.0`).
-- **Docker:** `docker pull ghcr.io/pdfik/cli:0.1.1` — linux/amd64 and linux/arm64;
+- **Docker:** `docker pull ghcr.io/pdfik/cli:0.2.0` — linux/amd64 and linux/arm64;
   `:0.1` and `:latest` track releases. How to run it (`--user`, mounting the
   output directory) is in the [Dockerfile](Dockerfile), which also builds
   locally with `docker build -t pdfik .`.
@@ -43,14 +44,20 @@ pdfik url-to-pdf https://example.com -o ./pdfs -f example.pdf   # -o directory, 
 pdfik html-to-pdf invoice.html -f invoice.pdf --format A4 --margin 10mm --margin-top 25mm
 pdfik url-to-pdf https://example.com --test                     # free: full pipeline, sample PDF
 pdfik url-to-pdf https://example.com -o -  > example.pdf        # stream the PDF to stdout
+pdfik markdown-to-pdf README.md -f readme.pdf                   # Markdown (GFM tables) → PDF
+pdfik url-to-image https://example.com --format jpeg --quality 80   # screenshot → ./<job-id>.jpg
+pdfik url-to-pdf https://example.com --deliver-url "$PRESIGNED_PUT_URL"  # straight to your bucket (Pro+)
 pdfik einvoice-to-pdf invoice.xml --profile en16931             # Factur-X e-invoice (PDF/A-3)
 pdfik status   <job-id>
-pdfik download <job-id> -o ./pdfs                               # fetch a finished job later
+pdfik download <job-id> -o ./pdfs                               # fetch a finished job later (.pdf/.png/.jpg)
 ```
 
-**`html-to-pdf` input is sanitized by the API** (`<style>`, `<script>` and
-`class` attributes are stripped server-side; relative assets are not resolved).
-**`url-to-pdf` renders with full fidelity** — prefer it for styled documents.
+**`html-to-pdf` / `html-to-image` input is sanitized by the API** (`<style>`,
+`<script>` and `class` attributes are stripped server-side; relative assets are
+not resolved). **`url-to-pdf` / `url-to-image` render with full fidelity** —
+prefer them for styled pages. `markdown-to-pdf` renders CommonMark plus GFM
+tables/strikethrough with a built-in print stylesheet; raw HTML inside the
+Markdown is escaped, not rendered.
 
 CSS backgrounds print by default (`--no-background` disables them). On Windows,
 avoid redirecting `-o -` in Windows PowerShell 5.1 (`powershell.exe` re-encodes
@@ -59,27 +66,35 @@ redirect from cmd.exe / PowerShell 7+.
 
 ## Flags
 
-Flags may appear before or after the positional argument. `url-to-pdf`,
-`html-to-pdf`, `einvoice-to-pdf` and `download` share the output flags;
-`status` takes only the connection flags. The page-layout flags apply to
-`url-to-pdf` and `html-to-pdf` only — an e-invoice's layout comes from its
-template (see [E-invoicing](#e-invoicing-factur-x)).
+Flags may appear before or after the positional argument. *The rendering
+commands* below are `url-to-pdf`, `html-to-pdf`, `markdown-to-pdf`,
+`url-to-image`, `html-to-image` and `einvoice-to-pdf`; they and `download`
+share the output flags, `status` takes only the connection flags. The
+page-layout flags apply to the three PDF page renderers (`url-to-pdf`,
+`html-to-pdf`, `markdown-to-pdf`), the screenshot flags to `url-to-image` and
+`html-to-image` — an e-invoice's layout comes from its template (see
+[E-invoicing](#e-invoicing-factur-x)).
 
 | Flag | Applies to | Meaning | Default |
 | :-- | :-- | :-- | :-- |
-| `-o`, `--output DIR` | url-to-pdf, html-to-pdf, einvoice-to-pdf, download | output **directory** (created if missing); `-` streams the PDF to stdout | current directory |
-| `-f`, `--file-name NAME` | url-to-pdf, html-to-pdf, einvoice-to-pdf, download | file name inside the output directory (bare name, no path) | `<job-id>.pdf` |
-| `--format SIZE` | url-to-pdf, html-to-pdf | page format, case-insensitive: `A0`–`A6`, `Letter`, `Legal`, `Tabloid`, `Ledger` | `A4` |
-| `--landscape` | url-to-pdf, html-to-pdf | landscape orientation | portrait |
-| `--margin VALUE` | url-to-pdf, html-to-pdf | page margins, each **with a unit** (`mm`, `cm`, `in`, `px`): one value for all sides, or CSS shorthand `top,right,bottom,left` (`--margin 10mm,1cm,0.5in,20px`; 2 values = vertical,horizontal; 3 = top,horizontal,bottom) | renderer default |
-| `--margin-top`, `--margin-right`, `--margin-bottom`, `--margin-left VALUE` | url-to-pdf, html-to-pdf | one side, same units; overrides `--margin` for that side | renderer default |
-| `--no-background` | url-to-pdf, html-to-pdf | skip CSS backgrounds | backgrounds print |
+| `-o`, `--output DIR` | rendering commands, download | output **directory** (created if missing); `-` streams the output to stdout | current directory |
+| `-f`, `--file-name NAME` | rendering commands, download | file name inside the output directory (bare name, no path) | `<job-id>.pdf` (`.png` / `.jpg` for the image commands; `download` picks the extension from the kind of output the job produced) |
+| `--format SIZE` | url-to-pdf, html-to-pdf, markdown-to-pdf | page format, case-insensitive: `A0`–`A6`, `Letter`, `Legal`, `Tabloid`, `Ledger` | `A4` |
+| `--landscape` | url-to-pdf, html-to-pdf, markdown-to-pdf | landscape orientation | portrait |
+| `--margin VALUE` | url-to-pdf, html-to-pdf, markdown-to-pdf | page margins, each **with a unit** (`mm`, `cm`, `in`, `px`): one value for all sides, or CSS shorthand `top,right,bottom,left` (`--margin 10mm,1cm,0.5in,20px`; 2 values = vertical,horizontal; 3 = top,horizontal,bottom) | renderer default |
+| `--margin-top`, `--margin-right`, `--margin-bottom`, `--margin-left VALUE` | url-to-pdf, html-to-pdf, markdown-to-pdf | one side, same units; overrides `--margin` for that side | renderer default |
+| `--no-background` | url-to-pdf, html-to-pdf, markdown-to-pdf | skip CSS backgrounds | backgrounds print |
+| `--format png\|jpeg` | url-to-image, html-to-image | image format (`jpg` is accepted as an alias for `jpeg`) | `png` |
+| `--full-page` | url-to-image, html-to-image | capture the whole scrollable page instead of just the visible area; the height follows the real page and is clipped at 8192 px (a ceiling, not a target — a 2,000 px page gives a 2,000 px image) | visible area only |
+| `--quality N` | url-to-image, html-to-image | JPEG quality `1`–`100` (jpeg only) | renderer default |
+| `--viewport WxH` | url-to-image, html-to-image | the browser window the page opens in, in CSS pixels (`--viewport 1024x768`) — you pick the size and the API captures exactly that, nothing is scaled or fitted; width `320`–`1920`, height `320`–`8192`. Sets the image width, and without `--full-page` also its height | `1024x768` |
+| `--deliver-url URL` | url-to-pdf, html-to-pdf, markdown-to-pdf, url-to-image, html-to-image | upload the output straight to your own storage via this presigned PUT `https` URL (Pro+). Nothing is stored on PDFik's side and nothing is downloaded — the CLI prints the destination you passed (query string stripped) instead of saving a file; the API itself never records it, so the `job.finished` webhook carries no address; not combinable with `-o`/`-f`. If the wait times out or is interrupted, the hint points at `pdfik status <job-id>` and the delivered URL — there is nothing to `pdfik download` | none |
 | `--profile NAME` | einvoice-to-pdf | Factur-X conformance profile the XML declares: `minimum`, `basicwl`, `basic`, `en16931`, `extended` | `en16931` |
 | `--template ID` | einvoice-to-pdf | id of a saved invoice template (Dashboard → E-Invoice) | the account default template |
 | `--webhook URL` | einvoice-to-pdf | callback URL that receives a POST with the job outcome | none |
-| `--test` | url-to-pdf, html-to-pdf, einvoice-to-pdf | free test run: full pipeline, sample PDF, no quota used | off |
-| `--timeout DUR` | url-to-pdf, html-to-pdf, einvoice-to-pdf | how long to wait for rendering (`90s`, `3m`) | `3m` |
-| `-q`, `--quiet` | url-to-pdf, html-to-pdf, einvoice-to-pdf, download | no progress lines; warnings and errors still print | off |
+| `--test` | rendering commands | free test run: full pipeline, sample output, no quota used | off |
+| `--timeout DUR` | rendering commands | how long to wait for rendering (`90s`, `3m`) | `3m` |
+| `-q`, `--quiet` | rendering commands, download | no progress lines; warnings and errors still print | off |
 | `--api-key KEY` | all | API key (prefer `PDFIK_API_KEY` — flag values are visible to other processes and shell history) | `$PDFIK_API_KEY` |
 | `--api-url URL` | all | API base URL (`https://` only, loopback excepted) | `$PDFIK_API_URL` or `https://api.pdfik.net` |
 | `-h`, `--help` | all | usage | |
@@ -127,10 +142,10 @@ Scripts can branch on these; they are also listed in `pdfik help`.
 | Code | Meaning |
 | :--: | :-- |
 | `0` | PDF written |
-| `1` | the request, render or download failed (API, network, file). If `job … queued` was printed, the job may still finish — `pdfik status <id>` / `pdfik download <id>` |
+| `1` | the request, render or download failed (API, network, file). If `job … queued` was printed, the job may still finish — `pdfik status <id>` / `pdfik download <id>` (`--deliver-url` runs: `pdfik status <id>` only — the output goes to your URL) |
 | `2` | invalid usage, or a value refused before anything was submitted (nothing charged) |
 | `3` | rendering failed on the server; the error code is printed (see [error codes](https://docs.pdfik.net/error-codes)) |
-| `4` | the job was not finished within `--timeout`; the job id is printed — fetch it later with `pdfik download <job-id>` |
+| `4` | the job was not finished within `--timeout`; the job id is printed — fetch it later with `pdfik download <job-id>` (named `<job-id>.pdf`, `.png` or `.jpg` after the job's output); for a `--deliver-url` run check it with `pdfik status <job-id>` — the output goes to your URL |
 | `130` | interrupted (Ctrl-C); any in-flight job keeps running on the server and its id is printed |
 
 ## wkhtmltopdf mode
@@ -138,7 +153,7 @@ Scripts can branch on these; they are also listed in `pdfik help`.
 ```bash
 alias wkhtmltopdf='pdfik wkhtmltopdf'
 wkhtmltopdf -s A4 -O Landscape --footer-center 'Page [page] of [topage]' https://example.com out.pdf
-wkhtmltopdf --username user --password pass https://intranet/report report.pdf   # Pro+
+wkhtmltopdf --username user --password pass https://example.com report.pdf   # Pro+
 ```
 
 Every wkhtmltopdf flag is either mapped to the API, accepted with a warning

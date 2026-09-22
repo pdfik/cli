@@ -1,8 +1,9 @@
 // Package api is a minimal client for the PDFik REST API.
 //
-// It speaks to the five published endpoints the CLI needs — submit a URL, an
-// HTML document or an e-invoice XML, poll a job, download the result — and
-// nothing else. The full contract lives at https://api.pdfik.net/openapi.json.
+// It speaks to the published endpoints the CLI needs — submit a URL, an HTML
+// or Markdown document or an e-invoice XML for a PDF, capture a URL or HTML
+// as a PNG/JPEG image, poll a job, download the result — and nothing else.
+// The full contract lives at https://api.pdfik.net/openapi.json.
 // Standard library only: zero dependencies is part of the tool's promise and
 // keeps the supply chain empty.
 //
@@ -60,6 +61,9 @@ const (
 
 	submitAttempts   = 3
 	downloadAttempts = 3
+	// A throttle (rate or concurrency limit) is waited out, not counted as a failed
+	// attempt — but not forever: after this many waits the 429 is returned.
+	throttleWaits = 5
 
 	errorBodyLimit   = 64 << 10
 	errorDetailLimit = 300
@@ -310,6 +314,34 @@ func (c *Client) SubmitEInvoice(ctx context.Context, xml string, opts Submission
 	return c.submit(ctx, "/einvoice-to-pdf", body)
 }
 
+// SubmitMarkdown asks the API to render a Markdown document to PDF.
+func (c *Client) SubmitMarkdown(ctx context.Context, markdown string, opts Submission) (Job, error) {
+	body := Submission{"markdown": markdown}
+	for k, v := range opts {
+		body[k] = v
+	}
+	return c.submit(ctx, "/markdown-to-pdf", body)
+}
+
+// SubmitURLImage asks the API to capture a public URL as a PNG/JPEG screenshot.
+func (c *Client) SubmitURLImage(ctx context.Context, target string, opts Submission) (Job, error) {
+	body := Submission{"url": target}
+	for k, v := range opts {
+		body[k] = v
+	}
+	return c.submit(ctx, "/url-to-image", body)
+}
+
+// SubmitHTMLImage asks the API to capture an HTML document as a PNG/JPEG
+// screenshot.
+func (c *Client) SubmitHTMLImage(ctx context.Context, html string, opts Submission) (Job, error) {
+	body := Submission{"html": html}
+	for k, v := range opts {
+		body[k] = v
+	}
+	return c.submit(ctx, "/html-to-image", body)
+}
+
 // submit posts the body once per attempt under ONE Idempotency-Key, so a
 // retried request after a lost response can never create — and charge — a
 // second job. Only transport failures and 502/503/504 are retried.
@@ -322,6 +354,7 @@ func (c *Client) submit(ctx context.Context, path string, body Submission) (Job,
 	if err != nil {
 		return Job{}, err
 	}
+	throttled := 0
 	for attempt := 1; ; attempt++ {
 		req, err := c.newRequest(ctx, http.MethodPost, path, bytes.NewReader(payload))
 		if err != nil {
@@ -337,6 +370,17 @@ func (c *Client) submit(ctx context.Context, path string, body Submission) (Job,
 			}
 			job.Status = SanitizeText(job.Status)
 			return job, nil
+		}
+		if isThrottled(err) && throttled < throttleWaits && ctx.Err() == nil {
+			// Found by the client check of 2026-09-21: a submit that met the
+			// per-minute limit failed outright, although the limit clears by
+			// itself and the idempotency key makes the resend safe.
+			throttled++
+			attempt-- // not a failed attempt
+			if err := c.sleep(ctx, throttleDelay(err, c.now)); err != nil {
+				return Job{}, err
+			}
+			continue
 		}
 		if attempt >= submitAttempts || !retryableSubmit(ctx, err) {
 			return Job{}, err
@@ -383,6 +427,22 @@ func isCertificateError(err error) bool {
 	var record tls.RecordHeaderError
 	return errors.As(err, &unknownAuthority) || errors.As(err, &hostname) ||
 		errors.As(err, &invalid) || errors.As(err, &record)
+}
+
+// StatusPatient is Status for a one-off `pdfik status`: a throttle (429 rate or
+// concurrency limit) is waited out with Retry-After instead of failing the
+// command. Wait does not use it — it has its own 429 handling bounded by the
+// caller's --timeout.
+func (c *Client) StatusPatient(ctx context.Context, jobID string) (JobStatus, error) {
+	for waits := 0; ; waits++ {
+		st, err := c.Status(ctx, jobID)
+		if err == nil || !isThrottled(err) || waits >= throttleWaits || ctx.Err() != nil {
+			return st, err
+		}
+		if err := c.sleep(ctx, throttleDelay(err, c.now)); err != nil {
+			return st, err
+		}
+	}
 }
 
 // Status fetches the job state once.
@@ -481,6 +541,24 @@ func (c *Client) notFinished(jobID string, last JobStatus, timeout time.Duration
 	return &NotFinishedError{JobID: jobID, Status: last.Status, After: timeout}
 }
 
+// isThrottled: the two 429s that clear by themselves within a minute — the
+// per-account request rate and the in-flight job cap. A quota 429 (monthly PDFs
+// or bytes), the test-mode caps and an exhausted download counter do not, so
+// they are returned at once.
+func isThrottled(err error) bool {
+	var apiErr *Error
+	return errors.As(err, &apiErr) && apiErr.Status == http.StatusTooManyRequests &&
+		(apiErr.IsCase("rate-limit-exceeded") || apiErr.IsCase("concurrency-limit-exceeded"))
+}
+
+func throttleDelay(err error, now func() time.Time) time.Duration {
+	var apiErr *Error
+	if errors.As(err, &apiErr) {
+		return apiErr.retryAfter(retryAfterFallback, now)
+	}
+	return retryAfterFallback
+}
+
 func isRateLimited(err error) bool {
 	var apiErr *Error
 	return errors.As(err, &apiErr) && apiErr.Status == http.StatusTooManyRequests
@@ -496,52 +574,55 @@ func isTransient(err error) bool {
 	return true
 }
 
-// Download streams the finished PDF into w and returns the byte count.
+// Download streams the finished output into w and returns the byte count and
+// the response's Content-Type — application/pdf, image/png or image/jpeg: the
+// job id alone does not say which kind of output it is.
 //
 // Attempts are counted by the API when a stream STARTS (three per file), so
 // the caller writes straight to the destination — there is no second
 // "verification" download. The two rejections the API documents as free
 // (429 download-busy, 503) are waited out and retried.
-func (c *Client) Download(ctx context.Context, jobID string, w io.Writer) (int64, error) {
+func (c *Client) Download(ctx context.Context, jobID string, w io.Writer) (int64, string, error) {
 	for attempt := 1; ; attempt++ {
-		n, apiErr, err := c.downloadOnce(ctx, jobID, w)
+		n, contentType, apiErr, err := c.downloadOnce(ctx, jobID, w)
 		if err != nil || apiErr == nil {
-			return n, err
+			return n, contentType, err
 		}
 		// Only the rejections the API documents as free are worth waiting out:
 		// another stream of this file is active (DOWNLOAD_BUSY), or the
 		// limit service is briefly unavailable (503). An exhausted attempt
 		// counter is also a 429 — with a Retry-After of an hour — and must not
 		// be retried.
-		retryable := apiErr.Status == http.StatusServiceUnavailable || apiErr.IsCase("download-busy")
+		retryable := apiErr.Status == http.StatusServiceUnavailable || apiErr.IsCase("download-busy") || isThrottled(apiErr)
 		if attempt >= downloadAttempts || !retryable {
-			return 0, apiErr
+			return 0, "", apiErr
 		}
 		if err := c.sleep(ctx, apiErr.retryAfter(retryAfterFallback, c.now)); err != nil {
-			return 0, err
+			return 0, "", err
 		}
 	}
 }
 
 // downloadOnce performs one download request. A rejection comes back as
 // apiErr (so the caller can decide to retry); anything else as err.
-func (c *Client) downloadOnce(parent context.Context, jobID string, w io.Writer) (n int64, apiErr *Error, err error) {
+func (c *Client) downloadOnce(parent context.Context, jobID string, w io.Writer) (n int64, contentType string, apiErr *Error, err error) {
 	// The request is bound to a context the stall watchdog can cancel; the
 	// caller's context is still honoured through it.
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	req, err := c.newRequest(ctx, http.MethodGet, "/jobs/"+url.PathEscape(jobID)+"/download", nil)
 	if err != nil {
-		return 0, nil, err
+		return 0, "", nil, err
 	}
 	resp, err := c.download.Do(req)
 	if err != nil {
-		return 0, nil, err
+		return 0, "", nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return 0, errorFrom(resp), nil
+		return 0, "", errorFrom(resp), nil
 	}
+	contentType = resp.Header.Get("Content-Type")
 	// Attempts are counted when the stream starts, so the bytes go straight to
 	// w. The watchdog is armed only around network reads (see stallReader), so
 	// a slow consumer of w — a paused pipe, a slow disk — never trips it.
@@ -550,18 +631,18 @@ func (c *Client) downloadOnce(parent context.Context, jobID string, w io.Writer)
 	n, err = io.Copy(w, &stallReader{r: resp.Body, timer: timer, stallAfter: c.stallTimeout})
 	if err != nil {
 		if parent.Err() != nil {
-			return n, nil, parent.Err()
+			return n, contentType, nil, parent.Err()
 		}
 		reason := err.Error()
 		if ctx.Err() != nil {
 			reason = fmt.Sprintf("no data for %s", c.stallTimeout)
 		}
-		return n, nil, &DownloadError{JobID: jobID, Bytes: n, Reason: reason}
+		return n, contentType, nil, &DownloadError{JobID: jobID, Bytes: n, Reason: reason}
 	}
 	if resp.ContentLength > 0 && n != resp.ContentLength {
-		return n, nil, &DownloadError{JobID: jobID, Bytes: n, Reason: fmt.Sprintf("got %d of %d bytes", n, resp.ContentLength)}
+		return n, contentType, nil, &DownloadError{JobID: jobID, Bytes: n, Reason: fmt.Sprintf("got %d of %d bytes", n, resp.ContentLength)}
 	}
-	return n, nil, nil
+	return n, contentType, nil, nil
 }
 
 // stallReader aborts the response when no bytes arrive for stallAfter. A slow
@@ -587,7 +668,7 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body io.Re
 	}
 	req.Header.Set("X-API-Key", c.apiKey)
 	req.Header.Set("User-Agent", c.userAgent)
-	req.Header.Set("Accept", "application/json, application/pdf")
+	req.Header.Set("Accept", "application/json, application/pdf, image/png, image/jpeg")
 	return req, nil
 }
 

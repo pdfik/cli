@@ -1,9 +1,11 @@
-// Command pdfik renders URLs and HTML to PDF through the PDFik cloud API.
+// Command pdfik renders URLs, HTML and Markdown to PDF — and captures URLs
+// and HTML as PNG/JPEG screenshots — through the PDFik cloud API.
 //
-// Commands: url-to-pdf, html-to-pdf, einvoice-to-pdf, wkhtmltopdf
-// (compatibility mode), status, download, version, help. Everything
-// human-readable goes to stderr; stdout carries only a PDF (`-o -`) or the
-// `status` line, so the tool pipes cleanly.
+// Commands: url-to-pdf, html-to-pdf, markdown-to-pdf, url-to-image,
+// html-to-image, einvoice-to-pdf, wkhtmltopdf (compatibility mode), status,
+// download, version, help. Everything human-readable goes to stderr; stdout
+// carries only the rendered output (`-o -`) or the `status` line, so the tool
+// pipes cleanly.
 package main
 
 import (
@@ -59,6 +61,10 @@ func run(ctx context.Context, args []string, std streams) int {
 	switch cmd {
 	case "url-to-pdf", "html-to-pdf":
 		err = cmdConvert(ctx, cmd, rest, std)
+	case "markdown-to-pdf":
+		err = cmdMarkdown(ctx, rest, std)
+	case "url-to-image", "html-to-image":
+		err = cmdScreenshot(ctx, cmd, rest, std)
 	case "einvoice-to-pdf":
 		err = cmdEInvoice(ctx, rest, std)
 	case "wkhtmltopdf":
@@ -130,11 +136,14 @@ func progress(w io.Writer, quiet bool, format string, a ...any) {
 }
 
 func usage(w io.Writer) {
-	fmt.Fprint(w, `pdfik — render URLs and HTML to PDF via the PDFik cloud API
+	fmt.Fprint(w, `pdfik — render URLs, HTML and Markdown to PDF or images via the PDFik cloud API
 
 Usage:
   pdfik url-to-pdf      <url>              [flags]
   pdfik html-to-pdf     <file.html | ->    [flags]
+  pdfik markdown-to-pdf <file.md | ->      [flags]
+  pdfik url-to-image    <url>              [flags]
+  pdfik html-to-image   <file.html | ->    [flags]
   pdfik einvoice-to-pdf <invoice.xml | ->  [flags]
   pdfik wkhtmltopdf [wkhtmltopdf-flags] <input> <output>
   pdfik download    <job-id>         [flags]
@@ -143,22 +152,37 @@ Usage:
 
 Flags:
   -o, --output DIR      output directory (default: current directory; created if missing);
-                        '-' streams the PDF to stdout
-  -f, --file-name NAME  file name inside the output directory (default: <job-id>.pdf)
-      --format SIZE     page format: A4 (default), A0-A6, Letter, Legal, Tabloid, Ledger
-      --landscape       landscape orientation
+                        '-' streams the output to stdout
+  -f, --file-name NAME  file name inside the output directory
+                        (default: <job-id>.pdf, or .png/.jpg for the image commands;
+                        download picks .pdf/.png/.jpg from the job's output)
+      --format SIZE     url/html/markdown-to-pdf: page format: A4 (default),
+                        A0-A6, Letter, Legal, Tabloid, Ledger
+      --landscape       landscape orientation (url/html/markdown-to-pdf)
       --margin VALUE    page margins, each with a unit (mm, cm, in, px): one value
                         for all sides, or CSS shorthand top,right,bottom,left
                         (2 = vertical,horizontal; 3 = top,horizontal,bottom)
       --margin-top VALUE, --margin-right, --margin-bottom, --margin-left
                         one side; overrides --margin for that side
       --no-background   skip CSS backgrounds (they print by default)
+      --format png|jpeg url/html-to-image: image format (default png; jpg = jpeg)
+      --full-page       url/html-to-image: capture the whole scrollable page
+                        instead of just the visible area; the height follows the
+                        page and is clipped at 8192 px
+      --quality N       url/html-to-image: JPEG quality 1-100 (jpeg only)
+      --viewport WxH    url/html-to-image: the browser window the page opens in,
+                        in CSS pixels — width 320-1920, height 320-8192
+                        (default 1024x768)
+      --deliver-url URL upload the output straight to your own storage via this
+                        presigned PUT URL (Pro+; not for einvoice-to-pdf):
+                        nothing is stored on PDFik's side, nothing is downloaded
+                        — the destination you passed is printed instead
       --profile NAME    einvoice-to-pdf: Factur-X profile the XML declares:
                         minimum, basicwl, basic, en16931 (default), extended
       --template ID     einvoice-to-pdf: id of a saved invoice template
                         (Dashboard → E-Invoice; default: the account default)
       --webhook URL     einvoice-to-pdf: callback URL POSTed when the job finishes
-      --test            free test run: full pipeline, sample PDF, no quota used
+      --test            free test run: full pipeline, sample output, no quota used
       --timeout DUR     how long to wait for rendering (default 3m; e.g. 90s)
   -q, --quiet           no progress lines (warnings and errors still print)
       --api-key KEY     API key; prefer $PDFIK_API_KEY — flag values are visible
@@ -176,8 +200,10 @@ Exit codes:
   4  not finished within --timeout (job id printed — fetch it later with
      'pdfik download <job-id>')                                   130  interrupted
 
-Note: html-to-pdf input is sanitized by the API (styles/scripts stripped) —
-use url-to-pdf for styled documents.
+Note: html-to-pdf and html-to-image input is sanitized by the API
+(styles/scripts stripped) — use url-to-pdf / url-to-image for styled pages.
+markdown-to-pdf renders CommonMark + GFM tables/strikethrough; raw HTML inside
+the Markdown is escaped, not rendered.
 einvoice-to-pdf builds a Factur-X (PDF/A-3) e-invoice from UN/CEFACT CII XML;
 its layout comes from an invoice template, so the page flags do not apply.
 An API key is required — create one at https://pdfik.net/dashboard/api-keys.

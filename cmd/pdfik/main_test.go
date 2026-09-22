@@ -223,7 +223,7 @@ func TestRenameFailureKeepsThePaidForPDF(t *testing.T) {
 	if r.code != exitFailure {
 		t.Fatalf("exit %d: %s", r.code, r.stderr)
 	}
-	mustContain(t, r.stderr, "The PDF was kept at")
+	mustContain(t, r.stderr, "The output was kept at")
 	m, _ := filepath.Glob(filepath.Join(dir, "x.pdf.partial-*"))
 	if len(m) != 1 {
 		t.Fatalf("expected the partial file to be kept, found %v", m)
@@ -430,6 +430,126 @@ func TestDownloadChecksTheStatusFirst(t *testing.T) {
 	}
 }
 
+// `pdfik download` is the recovery path the image commands print too, and the
+// job id does not say what kind of output it is — the download's Content-Type
+// does.
+func TestDownloadNamesTheFileAfterTheOutputKind(t *testing.T) {
+	f := apitest.New(t)
+	f.DownloadContentType = "image/png"
+	dir := t.TempDir()
+	r := execute(t, f, nil, "download", "job-1", "-o", dir)
+	if r.code != exitOK {
+		t.Fatalf("exit %d: %s", r.code, r.stderr)
+	}
+	want := filepath.Join(dir, "job-1.png")
+	if b, err := os.ReadFile(want); err != nil || string(b) != apitest.PNG {
+		t.Fatalf("a screenshot job must land as job-1.png: err=%v body=%q", err, b)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "job-1.pdf")); err == nil {
+		t.Fatal("job-1.pdf must not be written for a screenshot job")
+	}
+	if m, _ := filepath.Glob(filepath.Join(dir, "*.partial-*")); len(m) != 0 {
+		t.Fatalf("temp file leaked: %v", m)
+	}
+	mustContain(t, r.stderr, "saved "+want)
+
+	// -f is the user's choice and is kept verbatim.
+	r = execute(t, f, nil, "download", "job-1", "-o", dir, "-f", "shot.pdf")
+	if r.code != exitOK {
+		t.Fatalf("exit %d: %s", r.code, r.stderr)
+	}
+	if b, err := os.ReadFile(filepath.Join(dir, "shot.pdf")); err != nil || string(b) != apitest.PNG {
+		t.Fatalf("-f must be kept verbatim: err=%v body=%q", err, b)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "shot.png")); err == nil {
+		t.Fatal("-f shot.pdf must not be renamed")
+	}
+
+	r = execute(t, f, nil, "download", "job-1", "-o", "-")
+	if r.code != exitOK || r.stdout != apitest.PNG {
+		t.Fatalf("download to stdout: %d %q", r.code, r.stdout)
+	}
+}
+
+func TestExtForMedia(t *testing.T) {
+	for in, want := range map[string]string{
+		"application/pdf":            ".pdf",
+		"image/png":                  ".png",
+		"image/jpeg":                 ".jpg",
+		"IMAGE/JPEG; charset=binary": ".jpg",
+		"text/plain; charset=utf-8":  "",
+		"":                           "",
+	} {
+		if got := extForMedia(in); got != want {
+			t.Errorf("extForMedia(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
+// A --deliver-url job is never stored on PDFik's side (the API answers 404
+// output-delivered-externally to its download), so no recovery hint may send
+// the user to `pdfik download`.
+func TestDeliverURLRecoveryHintsNeverPointAtDownload(t *testing.T) {
+	const presigned = "https://bucket.example.com/renders/out.pdf?X-Amz-Signature=abc123"
+	const delivered = "https://bucket.example.com/renders/out.pdf"
+	f := apitest.New(t)
+	f.PollsUntilDone = 100
+	r := execute(t, f, nil, "url-to-pdf", "https://example.com", "--deliver-url", presigned, "--timeout", "1ms")
+	if r.code != exitNotFinished {
+		t.Fatalf("exit %d, want %d: %s", r.code, exitNotFinished, r.stderr)
+	}
+	mustContain(t, r.stderr, "pdfik status job-1")
+	mustContain(t, r.stderr, delivered)
+	if strings.Contains(r.stderr, "pdfik download") || strings.Contains(r.stderr, "X-Amz-Signature") {
+		t.Fatalf("no download advice and no presigned query string expected:\n%s", r.stderr)
+	}
+
+	f2 := apitest.New(t)
+	f2.PollStatuses = []int{502, 502, 502}
+	r = execute(t, f2, nil, "url-to-image", "https://example.com", "--deliver-url", presigned)
+	if r.code != exitFailure {
+		t.Fatalf("exit %d, want %d: %s", r.code, exitFailure, r.stderr)
+	}
+	mustContain(t, r.stderr, "API error 502")
+	mustContain(t, r.stderr, "pdfik status job-1")
+	mustContain(t, r.stderr, delivered)
+	if strings.Contains(r.stderr, "pdfik download") {
+		t.Fatalf("no download advice expected after poll failures:\n%s", r.stderr)
+	}
+	if f.Downloads()+f2.Downloads() != 0 {
+		t.Fatalf("a delivered job must never be downloaded: %d", f.Downloads()+f2.Downloads())
+	}
+}
+
+func TestDeliveryHintKeepsExitCodes(t *testing.T) {
+	const location = "https://bucket.example.com/renders/out.pdf"
+	cases := []struct {
+		name string
+		err  error
+		code int
+	}{
+		{"timeout", &api.NotFinishedError{JobID: "job-1", Status: api.StatusRendering, After: time.Minute}, exitNotFinished},
+		{"interrupted", withJobHint(context.Canceled, "job-1"), exitInterrupted},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := deliveryHint(tc.err, "job-1", location)
+			msg := err.Error()
+			if strings.Contains(msg, "pdfik download") || !strings.Contains(msg, "pdfik status job-1") || !strings.Contains(msg, location) {
+				t.Fatalf("hint not rewritten: %s", msg)
+			}
+			var stderr bytes.Buffer
+			if code := report(&stderr, "pdfik url-to-pdf", err); code != tc.code {
+				t.Fatalf("exit %d, want %d: %s", code, tc.code, stderr.String())
+			}
+		})
+	}
+	failed := withJobHint(&api.RenderError{JobID: "job-1", Code: "PAGE_TIMEOUT"}, "job-1")
+	if got := deliveryHint(failed, "job-1", location); got != failed {
+		t.Fatalf("an error without download advice must be returned unchanged: %v", got)
+	}
+}
+
 func TestEnvironmentFallbacks(t *testing.T) {
 	f := apitest.New(t)
 	t.Setenv("PDFIK_API_KEY", "sk_live_env")
@@ -538,13 +658,16 @@ func TestParseInterleavedHonoursDoubleDash(t *testing.T) {
 }
 
 func TestOutputPathHelpers(t *testing.T) {
-	if p := outputPath("", "", "job-1"); p != filepath.Join(".", "job-1.pdf") {
+	if p := outputPath("", "", "job-1", ".pdf"); p != filepath.Join(".", "job-1.pdf") {
 		t.Fatalf("default path: %q", p)
 	}
-	if p := outputPath("out", "x.pdf", "job-1"); p != filepath.Join("out", "x.pdf") {
+	if p := outputPath("", "", "job-1", ".png"); p != filepath.Join(".", "job-1.png") {
+		t.Fatalf("default image path: %q", p)
+	}
+	if p := outputPath("out", "x.pdf", "job-1", ".pdf"); p != filepath.Join("out", "x.pdf") {
 		t.Fatalf("named path: %q", p)
 	}
-	if p := outputPath("-", "ignored.pdf", "job-1"); p != "-" {
+	if p := outputPath("-", "ignored.pdf", "job-1", ".pdf"); p != "-" {
 		t.Fatalf("stdout marker: %q", p)
 	}
 	dir := t.TempDir()
