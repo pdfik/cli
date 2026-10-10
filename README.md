@@ -1,6 +1,6 @@
 # pdfik CLI
 
-> **Where this code lives:** developed in the PDFik platform monorepo; this tree is its commit `b3b9cc7`.
+> **Where this code lives:** developed in the PDFik platform monorepo; this tree is its commit `0f65e8b`.
 > Issues and PRs are welcome here; accepted PRs are applied upstream and land with the next sync (see CONTRIBUTING.md).
 
 [![CI](https://github.com/pdfik/cli/actions/workflows/ci.yml/badge.svg)](https://github.com/pdfik/cli/actions/workflows/ci.yml)
@@ -27,9 +27,9 @@ use the CLI, and `--test` runs are free on every plan.
   chmod +x pdfik-linux-amd64 && sudo mv pdfik-linux-amd64 /usr/local/bin/pdfik
   ```
 - **Go 1.23 or newer:** `go install github.com/pdfik/cli/cmd/pdfik@latest`
-  (pin a version with `@v0.1.0`).
-- **Docker:** `docker pull ghcr.io/pdfik/cli:0.2.0` — linux/amd64 and linux/arm64;
-  `:0.1` and `:latest` track releases. How to run it (`--user`, mounting the
+  (pin a version with `@v0.3.1`).
+- **Docker:** `docker pull ghcr.io/pdfik/cli:0.3.1` — linux/amd64 and linux/arm64;
+  `:0.3` and `:latest` track releases. How to run it (`--user`, mounting the
   output directory) is in the [Dockerfile](Dockerfile), which also builds
   locally with `docker build -t pdfik .`.
 - **From source:** `go build -o pdfik ./cmd/pdfik`.
@@ -46,7 +46,7 @@ pdfik url-to-pdf https://example.com --test                     # free: full pip
 pdfik url-to-pdf https://example.com -o -  > example.pdf        # stream the PDF to stdout
 pdfik markdown-to-pdf README.md -f readme.pdf                   # Markdown (GFM tables) → PDF
 pdfik url-to-image https://example.com --format jpeg --quality 80   # screenshot → ./<job-id>.jpg
-pdfik url-to-pdf https://example.com --deliver-url "$PRESIGNED_PUT_URL"  # straight to your bucket (Pro+)
+pdfik url-to-pdf https://example.com --deliver-url "$PRESIGNED_PUT_URL"  # straight to your bucket
 pdfik einvoice-to-pdf invoice.xml --profile en16931             # Factur-X e-invoice (PDF/A-3)
 pdfik status   <job-id>
 pdfik download <job-id> -o ./pdfs                               # fetch a finished job later (.pdf/.png/.jpg)
@@ -88,7 +88,7 @@ page-layout flags apply to the three PDF page renderers (`url-to-pdf`,
 | `--full-page` | url-to-image, html-to-image | capture the whole scrollable page instead of just the visible area; the height follows the real page and is clipped at 8192 px (a ceiling, not a target — a 2,000 px page gives a 2,000 px image) | visible area only |
 | `--quality N` | url-to-image, html-to-image | JPEG quality `1`–`100` (jpeg only) | renderer default |
 | `--viewport WxH` | url-to-image, html-to-image | the browser window the page opens in, in CSS pixels (`--viewport 1024x768`) — you pick the size and the API captures exactly that, nothing is scaled or fitted; width `320`–`1920`, height `320`–`8192`. Sets the image width, and without `--full-page` also its height | `1024x768` |
-| `--deliver-url URL` | url-to-pdf, html-to-pdf, markdown-to-pdf, url-to-image, html-to-image | upload the output straight to your own storage via this presigned PUT `https` URL (Pro+). Nothing is stored on PDFik's side and nothing is downloaded — the CLI prints the destination you passed (query string stripped) instead of saving a file; the API itself never records it, so the `job.finished` webhook carries no address; not combinable with `-o`/`-f`. If the wait times out or is interrupted, the hint points at `pdfik status <job-id>` and the delivered URL — there is nothing to `pdfik download` | none |
+| `--deliver-url URL` | url-to-pdf, html-to-pdf, markdown-to-pdf, url-to-image, html-to-image | upload the output straight to your own storage via this presigned PUT `https` URL. Nothing is stored on PDFik's side and nothing is downloaded — the CLI prints the destination you passed (query string stripped) instead of saving a file; the API itself never records it, so the `job.finished` webhook carries no address; not combinable with `-o`/`-f`. If the wait times out or is interrupted, the hint points at `pdfik status <job-id>` and the delivered URL — there is nothing to `pdfik download` | none |
 | `--profile NAME` | einvoice-to-pdf | Factur-X conformance profile the XML declares: `minimum`, `basicwl`, `basic`, `en16931`, `extended` | `en16931` |
 | `--template ID` | einvoice-to-pdf | id of a saved invoice template (Dashboard → E-Invoice) | the account default template |
 | `--webhook URL` | einvoice-to-pdf | callback URL that receives a POST with the job outcome | none |

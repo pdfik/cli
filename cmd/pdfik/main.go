@@ -174,7 +174,7 @@ Flags:
                         in CSS pixels — width 320-1920, height 320-8192
                         (default 1024x768)
       --deliver-url URL upload the output straight to your own storage via this
-                        presigned PUT URL (Pro+; not for einvoice-to-pdf):
+                        presigned PUT URL (not for einvoice-to-pdf):
                         nothing is stored on PDFik's side, nothing is downloaded
                         — the destination you passed is printed instead
       --profile NAME    einvoice-to-pdf: Factur-X profile the XML declares:

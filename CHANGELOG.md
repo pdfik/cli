@@ -4,6 +4,21 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] — 2026-10-10
+
+A documentation-only release: no API or behaviour change in the client. Commands, flags,
+requests and exit codes are exactly those of 0.3.0; only the README and the text printed
+by `pdfik help` changed.
+
+### Changed
+- `--deliver-url` (the API's BYOB `delivery` option) is available on every plan — a
+  server-side change of 2026-10-09; it used to be Pro+. The README (quick start and the
+  flags table) and `pdfik help` no longer mark it "Pro+". The 0.3.0 notes are left as
+  published and describe the gate as it was then.
+- README, "Install": the Docker line names this release (`ghcr.io/pdfik/cli:0.3.1`, with
+  `:0.3` and `:latest` tracking releases) and the `go install` pin example reads
+  `@v0.3.1`. They still named `0.2.0`, `:0.1` and `@v0.1.0`.
+
 ## [0.3.0] — 2026-09-19
 
 ### Fixed
@@ -102,6 +117,7 @@ First public release.
 - Static binaries for Linux/macOS/Windows with a checksums file, and a
   `FROM scratch` non-root container image.
 
+[0.3.1]: https://github.com/pdfik/cli/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/pdfik/cli/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/pdfik/cli/compare/v0.1.1...v0.2.0
 [0.1.0]: https://github.com/pdfik/cli/releases/tag/v0.1.0
