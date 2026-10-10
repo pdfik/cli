@@ -29,6 +29,10 @@ jobs:
       - run: go vet ./...
       - run: go test -race -count=1 ./...
 
+  # Lint runs on the module's own Go version (go.mod), never on `stable`: staticcheck reads
+  # the compiler's export data, and a Go release can change that format before any
+  # staticcheck release understands it (Go 1.27.2 did, in a patch). Compatibility with
+  # new Go versions is the `test` matrix's job.
   lint:
     name: staticcheck
     runs-on: ubuntu-latest
@@ -36,7 +40,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: stable
+          go-version-file: go.mod
           check-latest: true
       - run: go install honnef.co/go/tools/cmd/staticcheck@latest
       - run: staticcheck ./...
