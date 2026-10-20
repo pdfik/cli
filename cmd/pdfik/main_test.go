@@ -736,7 +736,7 @@ func TestExitCodesAreDocumented(t *testing.T) {
 	}
 	var usageText bytes.Buffer
 	usage(&usageText)
-	for _, code := range []int{exitOK, exitFailure, exitUsage, exitRenderFailed, exitNotFinished, exitInterrupted} {
+	for _, code := range []int{exitOK, exitFailure, exitUsage, exitRenderFailed, exitNotFinished, exitSyncTimeout, exitInterrupted} {
 		row := "| `" + strconv.Itoa(code) + "` |"
 		if !strings.Contains(string(readme), row) {
 			t.Errorf("README.md lacks the exit-code row for %d", code)

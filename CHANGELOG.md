@@ -4,6 +4,31 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] — 2026-10-20
+
+### Added
+- `--sync` on `url-to-pdf`, `html-to-pdf`, `markdown-to-pdf`, `url-to-image`,
+  `html-to-image` and `einvoice-to-pdf`: the request waits for the render (the
+  server holds it up to ~45 s) and the file streams straight back — one
+  request, no polling, no download step. The output is written atomically
+  under the job id from the `X-PDFik-Job-Id` response header (`-f` and `-o -`
+  work as usual), an e-invoice profile note arriving as `X-PDFik-Warning` is
+  printed to stderr even under `-q`, and rate-limit/concurrency 429s are
+  waited out under the same idempotency key, exactly like an async submit.
+  Against a server that predates sync mode (it ignores `wait` and answers
+  202) the CLI fails with the created job's id and says to fetch it with
+  `pdfik download` or rerun without `--sync`. The async commands are
+  byte-for-byte unchanged.
+- Exit code `5`: the `--sync` wait expired on the server — the job was
+  cancelled, nothing was charged and the idempotency key was released, so
+  retrying is safe (for renders this long, drop `--sync`). A proxy's own
+  HTML 504/524 is deliberately NOT exit 5: without the API's JSON verdict the
+  job's state is unknown, and the message says so instead of promising a
+  refund.
+- `--sync` + `--deliver-url` is refused locally (exit 2, nothing submitted):
+  the sync response carries the file itself, while `--deliver-url` sends the
+  output to your storage.
+
 ## [0.3.1] — 2026-10-10
 
 A documentation-only release: no API or behaviour change in the client. Commands, flags,
@@ -117,6 +142,7 @@ First public release.
 - Static binaries for Linux/macOS/Windows with a checksums file, and a
   `FROM scratch` non-root container image.
 
+[0.4.0]: https://github.com/pdfik/cli/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/pdfik/cli/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/pdfik/cli/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/pdfik/cli/compare/v0.1.1...v0.2.0

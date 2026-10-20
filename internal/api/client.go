@@ -2,7 +2,9 @@
 //
 // It speaks to the published endpoints the CLI needs — submit a URL, an HTML
 // or Markdown document or an e-invoice XML for a PDF, capture a URL or HTML
-// as a PNG/JPEG image, poll a job, download the result — and nothing else.
+// as a PNG/JPEG image, poll a job, download the result, or hold a submission
+// open and stream the file back in the same request (the API's `wait` mode) —
+// and nothing else.
 // The full contract lives at https://api.pdfik.net/openapi.json.
 // Standard library only: zero dependencies is part of the tool's promise and
 // keeps the supply chain empty.
@@ -51,6 +53,14 @@ const (
 	defaultStallTimeout   = 90 * time.Second
 	maxRedirects          = 10
 
+	// A wait:true submission is HELD by the server for up to 45 s before the
+	// file (or its own 503) comes back, so neither of the other two clients
+	// fits: the overall 60 s request timeout would cut a large file body
+	// mid-transfer, and the 30 s header timeout would fire while the server is
+	// still legitimately holding. Headers later than this mean the hold was
+	// lost in transit.
+	syncResponseHeaderTimeout = 70 * time.Second
+
 	pollInitial        = 2 * time.Second
 	pollStep           = 2 * time.Second
 	pollMax            = 10 * time.Second
@@ -82,12 +92,13 @@ func ValidJobID(id string) bool { return jobIDPattern.MatchString(id) }
 
 // Client talks to one API base URL with one API key.
 type Client struct {
-	baseURL        string
-	apiKey         string
-	userAgent      string
-	insecureHTTP   bool
-	stallTimeout   time.Duration
-	requestTimeout time.Duration
+	baseURL           string
+	apiKey            string
+	userAgent         string
+	insecureHTTP      bool
+	stallTimeout      time.Duration
+	requestTimeout    time.Duration
+	syncHeaderTimeout time.Duration
 
 	// Submissions and polls answer in milliseconds — a hard timeout fits them.
 	// The download streams a file that can be 150 MB and each started stream
@@ -95,8 +106,12 @@ type Client struct {
 	// WITHOUT an overall deadline: aborting a slow-link download halfway would
 	// waste an attempt on every retry. It still has a response-header timeout
 	// and a stall watchdog, so a dead connection cannot hang forever.
+	// Sync (wait-mode) requests are held server-side for up to 45 s and then
+	// stream a whole file, so they get a third client: no overall deadline
+	// either, but a header timeout generous enough for the hold.
 	http     *http.Client
 	download *http.Client
+	sync     *http.Client
 
 	// Injectable time, so the polling schedule is testable without sleeping.
 	sleep func(ctx context.Context, d time.Duration) error
@@ -126,6 +141,13 @@ func WithClock(sleep func(context.Context, time.Duration) error, now func() time
 // (default 60 s). Downloads are bounded by the stall watchdog instead.
 func WithRequestTimeout(d time.Duration) Option { return func(c *Client) { c.requestTimeout = d } }
 
+// WithSyncHeaderTimeout sets how long a wait-mode request may go without
+// response headers (default 70 s — the server holds it for up to 45 s on
+// purpose). Tests shrink it; nothing else should.
+func WithSyncHeaderTimeout(d time.Duration) Option {
+	return func(c *Client) { c.syncHeaderTimeout = d }
+}
+
 // ErrNoAPIKey is returned by New when no key was given.
 var ErrNoAPIKey = errors.New("no API key: set PDFIK_API_KEY or pass --api-key (create one at https://pdfik.net/dashboard/api-keys)")
 
@@ -138,13 +160,14 @@ func New(baseURL, apiKey string, opts ...Option) (*Client, error) {
 		baseURL = DefaultBaseURL
 	}
 	c := &Client{
-		baseURL:        strings.TrimRight(baseURL, "/"),
-		apiKey:         apiKey,
-		userAgent:      "pdfik-cli",
-		stallTimeout:   defaultStallTimeout,
-		requestTimeout: requestTimeout,
-		sleep:          sleepContext,
-		now:            time.Now,
+		baseURL:           strings.TrimRight(baseURL, "/"),
+		apiKey:            apiKey,
+		userAgent:         "pdfik-cli",
+		stallTimeout:      defaultStallTimeout,
+		requestTimeout:    requestTimeout,
+		syncHeaderTimeout: syncResponseHeaderTimeout,
+		sleep:             sleepContext,
+		now:               time.Now,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -158,8 +181,11 @@ func New(baseURL, apiKey string, opts ...Option) (*Client, error) {
 	}
 	downloadTransport := transport.Clone()
 	downloadTransport.ResponseHeaderTimeout = responseHeaderTimeout
+	syncTransport := transport.Clone()
+	syncTransport.ResponseHeaderTimeout = c.syncHeaderTimeout
 	c.http = &http.Client{Timeout: c.requestTimeout, Transport: transport.Clone(), CheckRedirect: stripKeyOnRedirect}
 	c.download = &http.Client{Transport: downloadTransport, CheckRedirect: stripKeyOnRedirect}
+	c.sync = &http.Client{Transport: syncTransport, CheckRedirect: stripKeyOnRedirect}
 	return c, nil
 }
 
@@ -340,6 +366,195 @@ func (c *Client) SubmitHTMLImage(ctx context.Context, html string, opts Submissi
 		body[k] = v
 	}
 	return c.submit(ctx, "/html-to-image", body)
+}
+
+// SyncResult is what a wait-mode render reports alongside the streamed file.
+type SyncResult struct {
+	// JobID comes from the X-PDFik-Job-Id response header — the default file
+	// name — and is also filled in on the error paths that know it (the
+	// server's own sync timeout, a failed render, a 202 from an old server).
+	JobID string
+	// ContentType is the response's media type: application/pdf, image/png or
+	// image/jpeg.
+	ContentType string
+	// Bytes is how much of the file reached w.
+	Bytes int64
+	// Warning is the X-PDFik-Warning header, if any (the e-invoice profile
+	// note travels there — a file response has no detail field to carry it).
+	Warning string
+}
+
+// RenderURLSync renders a public URL and streams the finished PDF straight
+// into w (the API's wait mode): one request, no polling, no download step.
+func (c *Client) RenderURLSync(ctx context.Context, target string, opts Submission, w io.Writer) (SyncResult, error) {
+	body := Submission{"url": target}
+	for k, v := range opts {
+		body[k] = v
+	}
+	return c.renderSync(ctx, "/url-to-pdf", body, w)
+}
+
+// RenderHTMLSync renders an HTML document and streams the finished PDF into w.
+func (c *Client) RenderHTMLSync(ctx context.Context, html string, opts Submission, w io.Writer) (SyncResult, error) {
+	body := Submission{"html": html}
+	for k, v := range opts {
+		body[k] = v
+	}
+	return c.renderSync(ctx, "/html-to-pdf", body, w)
+}
+
+// RenderMarkdownSync renders a Markdown document and streams the finished PDF
+// into w.
+func (c *Client) RenderMarkdownSync(ctx context.Context, markdown string, opts Submission, w io.Writer) (SyncResult, error) {
+	body := Submission{"markdown": markdown}
+	for k, v := range opts {
+		body[k] = v
+	}
+	return c.renderSync(ctx, "/markdown-to-pdf", body, w)
+}
+
+// RenderEInvoiceSync builds a Factur-X e-invoice and streams the finished
+// PDF/A-3 into w.
+func (c *Client) RenderEInvoiceSync(ctx context.Context, xml string, opts Submission, w io.Writer) (SyncResult, error) {
+	body := Submission{"xml": xml}
+	for k, v := range opts {
+		body[k] = v
+	}
+	return c.renderSync(ctx, "/einvoice-to-pdf", body, w)
+}
+
+// RenderURLImageSync captures a public URL and streams the finished PNG/JPEG
+// into w.
+func (c *Client) RenderURLImageSync(ctx context.Context, target string, opts Submission, w io.Writer) (SyncResult, error) {
+	body := Submission{"url": target}
+	for k, v := range opts {
+		body[k] = v
+	}
+	return c.renderSync(ctx, "/url-to-image", body, w)
+}
+
+// RenderHTMLImageSync captures an HTML document and streams the finished
+// PNG/JPEG into w.
+func (c *Client) RenderHTMLImageSync(ctx context.Context, html string, opts Submission, w io.Writer) (SyncResult, error) {
+	body := Submission{"html": html}
+	for k, v := range opts {
+		body[k] = v
+	}
+	return c.renderSync(ctx, "/html-to-image", body, w)
+}
+
+// renderSync posts one wait:true submission and streams the file from the
+// response. It deliberately does NOT share submit's 502/503/504 retry: by the
+// time such an answer arrives the render may have happened, and re-sending
+// would re-render — and re-charge — a job whose outcome is unknowable here.
+// The only resend is the throttle wait (rate/concurrency 429s clear by
+// themselves), under the same Idempotency-Key, exactly like submit.
+func (c *Client) renderSync(ctx context.Context, path string, body Submission, w io.Writer) (SyncResult, error) {
+	body["wait"] = true
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return SyncResult{}, err
+	}
+	key, err := newIdempotencyKey()
+	if err != nil {
+		return SyncResult{}, err
+	}
+	for waits := 0; ; waits++ {
+		res, apiErr, err := c.renderSyncOnce(ctx, path, payload, key, w)
+		if err != nil || apiErr == nil {
+			return res, err
+		}
+		switch {
+		case apiErr.IsCase("sync-timeout"):
+			// The API's own verdict: the job was cancelled, the quota unit
+			// refunded and the Idempotency-Key released — retrying is safe.
+			return SyncResult{JobID: apiErr.JobID}, &SyncTimeoutError{JobID: apiErr.JobID}
+		case apiErr.IsCase("job-failed"):
+			// The render reached "failed" — same meaning as the async wait
+			// reporting a failed job, so the same typed error (exit code 3).
+			return SyncResult{JobID: apiErr.JobID}, &RenderError{JobID: apiErr.JobID, Code: apiErr.Code}
+		case apiErr.Status == http.StatusGatewayTimeout || apiErr.Status == 524:
+			// A proxy's own timeout page (ingress 504, Cloudflare 524), not the
+			// API's sync timeout: the request died in transit, so the job may
+			// still render — and be charged. Only the API's JSON SYNC_TIMEOUT
+			// proves the cancel-and-refund happened.
+			return SyncResult{}, fmt.Errorf("HTTP %d from a proxy in front of the API, not the API's sync timeout: the job's state is unknown — it may still finish and count against your quota; check the dashboard's recent jobs before retrying, or rerun without --sync (%w)", apiErr.Status, apiErr)
+		case isThrottled(apiErr) && waits < throttleWaits && ctx.Err() == nil:
+			if err := c.sleep(ctx, apiErr.retryAfter(retryAfterFallback, c.now)); err != nil {
+				return SyncResult{}, err
+			}
+		default:
+			return SyncResult{}, apiErr
+		}
+	}
+}
+
+// renderSyncOnce performs one wait-mode request. A non-200 rejection comes
+// back as apiErr for renderSync to classify; the streamed file goes straight
+// into w, guarded by the same stall watchdog as a download.
+func (c *Client) renderSyncOnce(parent context.Context, path string, payload []byte, key string, w io.Writer) (SyncResult, *Error, error) {
+	// The request is bound to a context the stall watchdog can cancel; the
+	// caller's context is still honoured through it.
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	req, err := c.newRequest(ctx, http.MethodPost, path, bytes.NewReader(payload))
+	if err != nil {
+		return SyncResult{}, nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Idempotency-Key", key)
+	resp, err := c.sync.Do(req)
+	if err != nil {
+		return SyncResult{}, nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusAccepted {
+		// A server that predates sync mode ignores `wait` and answers the
+		// ordinary async 202. The job IS created — name it and point at the
+		// async recovery path instead of letting the JSON land in the output.
+		var job Job
+		if decodeErr := json.NewDecoder(io.LimitReader(resp.Body, responseLimit)).Decode(&job); decodeErr == nil && ValidJobID(job.JobID) {
+			id := SanitizeText(job.JobID)
+			return SyncResult{JobID: id}, nil, fmt.Errorf("the server accepted the job asynchronously (HTTP 202) and ignored \"wait\" — it predates sync mode. Job %s was created and is rendering; fetch it with: pdfik download %s, or rerun without --sync", id, id)
+		}
+		return SyncResult{}, nil, fmt.Errorf("the server accepted the job asynchronously (HTTP 202) and ignored \"wait\" — it predates sync mode; rerun without --sync")
+	}
+	if resp.StatusCode != http.StatusOK {
+		return SyncResult{}, errorFrom(resp), nil
+	}
+	res := SyncResult{
+		JobID:       SanitizeText(resp.Header.Get("X-PDFik-Job-Id")),
+		ContentType: resp.Header.Get("Content-Type"),
+		Warning:     SanitizeText(resp.Header.Get("X-PDFik-Warning")),
+	}
+	if !ValidJobID(res.JobID) {
+		// Without the id there is no default file name and no way to refer to
+		// the job afterwards — a 200 without it is not the API's sync answer.
+		return SyncResult{}, nil, fmt.Errorf("the server answered 200 without a valid X-PDFik-Job-Id header — not a PDFik sync response")
+	}
+	// The sync stream consumes one of the file's three download attempts, like
+	// any started stream, so the bytes go straight to w. The watchdog is armed
+	// only around network reads (see stallReader).
+	timer := time.AfterFunc(c.stallTimeout, cancel)
+	timer.Stop()
+	n, err := io.Copy(w, &stallReader{r: resp.Body, timer: timer, stallAfter: c.stallTimeout})
+	res.Bytes = n
+	if err != nil {
+		if parent.Err() != nil {
+			return res, nil, parent.Err()
+		}
+		reason := err.Error()
+		if ctx.Err() != nil {
+			reason = fmt.Sprintf("no data for %s", c.stallTimeout)
+		}
+		// The file stays downloadable for the normal 24 h, so DownloadError's
+		// recovery advice holds for a broken sync stream too.
+		return res, nil, &DownloadError{JobID: res.JobID, Bytes: n, Reason: reason}
+	}
+	if resp.ContentLength > 0 && n != resp.ContentLength {
+		return res, nil, &DownloadError{JobID: res.JobID, Bytes: n, Reason: fmt.Sprintf("got %d of %d bytes", n, resp.ContentLength)}
+	}
+	return res, nil, nil
 }
 
 // submit posts the body once per attempt under ONE Idempotency-Key, so a

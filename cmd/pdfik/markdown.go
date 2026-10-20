@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"io"
 
 	"github.com/pdfik/cli/internal/api"
 )
@@ -43,7 +44,7 @@ func cmdMarkdown(ctx context.Context, args []string, std streams) error {
 
 	// Settle the destination before submitting: a bad -o/-f must not cost a
 	// render.
-	if err := checkDestination(cf.deliverURL, cf.output, cf.fileName, std.out); err != nil {
+	if err := checkDestination(cf.deliverURL, cf.sync, cf.output, cf.fileName, std.out); err != nil {
 		return err
 	}
 
@@ -54,6 +55,12 @@ func cmdMarkdown(ctx context.Context, args []string, std streams) error {
 	submit := func(ctx context.Context, c *api.Client) (api.Job, error) {
 		return c.SubmitMarkdown(ctx, markdown, body)
 	}
+	var sync syncFunc
+	if cf.sync {
+		sync = func(ctx context.Context, c *api.Client, w io.Writer) (api.SyncResult, error) {
+			return c.RenderMarkdownSync(ctx, markdown, body, w)
+		}
+	}
 
 	client, err := cf.conn.newClient(std.err)
 	if err != nil {
@@ -61,5 +68,6 @@ func cmdMarkdown(ctx context.Context, args []string, std streams) error {
 	}
 	return renderAndSave(ctx, client, submit, func(jobID string) string {
 		return outputPath(cf.output, cf.fileName, jobID, ".pdf")
-	}, runOptions{timeout: cf.timeout, quiet: cf.quiet, test: cf.test, deliverURL: cf.deliverURL}, std)
+	}, runOptions{timeout: cf.timeout, quiet: cf.quiet, test: cf.test, deliverURL: cf.deliverURL,
+		sync: sync, output: cf.output, fileName: cf.fileName}, std)
 }

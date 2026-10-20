@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"io"
 	"strings"
 	"time"
 
@@ -33,6 +34,7 @@ type einvoiceFlags struct {
 	profile  string
 	template string
 	webhook  string
+	sync     bool
 	test     bool
 	quiet    bool
 	timeout  time.Duration
@@ -48,6 +50,7 @@ func parseEInvoiceFlags(args []string) (einvoiceFlags, []string, error) {
 	fs.StringVar(&ef.profile, "profile", "", "")
 	fs.StringVar(&ef.template, "template", "", "")
 	fs.StringVar(&ef.webhook, "webhook", "", "")
+	fs.BoolVar(&ef.sync, "sync", false, "")
 	fs.BoolVar(&ef.test, "test", false, "")
 	fs.BoolVar(&ef.quiet, "q", false, "")
 	fs.BoolVar(&ef.quiet, "quiet", false, "")
@@ -109,6 +112,12 @@ func cmdEInvoice(ctx context.Context, args []string, std streams) error {
 	submit := func(ctx context.Context, c *api.Client) (api.Job, error) {
 		return c.SubmitEInvoice(ctx, xml, body)
 	}
+	var sync syncFunc
+	if ef.sync {
+		sync = func(ctx context.Context, c *api.Client, w io.Writer) (api.SyncResult, error) {
+			return c.RenderEInvoiceSync(ctx, xml, body, w)
+		}
+	}
 
 	client, err := ef.conn.newClient(std.err)
 	if err != nil {
@@ -116,5 +125,6 @@ func cmdEInvoice(ctx context.Context, args []string, std streams) error {
 	}
 	return renderAndSave(ctx, client, submit, func(jobID string) string {
 		return outputPath(ef.output, ef.fileName, jobID, ".pdf")
-	}, runOptions{timeout: ef.timeout, quiet: ef.quiet, test: ef.test}, std)
+	}, runOptions{timeout: ef.timeout, quiet: ef.quiet, test: ef.test,
+		sync: sync, output: ef.output, fileName: ef.fileName}, std)
 }

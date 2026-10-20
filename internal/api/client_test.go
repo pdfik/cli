@@ -759,3 +759,193 @@ func TestDownloadWaitsOutTheRequestRateLimit(t *testing.T) {
 		t.Fatalf("download must survive the request limiter's 429: %v calls=%d", err, calls)
 	}
 }
+
+func TestRenderSyncStreamsTheFileInOneRequest(t *testing.T) {
+	f := apitest.New(t)
+	f.SyncWarning = "profile minimum embeds accompanying data only"
+	c, clock := newTestClient(t, f.URL)
+	var buf bytes.Buffer
+	res, err := c.RenderURLSync(context.Background(), "https://example.com", Submission{"test": true}, &buf)
+	if err != nil {
+		t.Fatalf("sync render: %v", err)
+	}
+	if buf.String() != apitest.PDF {
+		t.Fatalf("streamed body wrong: %q", buf.String())
+	}
+	if res.JobID != apitest.JobID || res.ContentType != "application/pdf" ||
+		res.Bytes != int64(len(apitest.PDF)) || res.Warning != f.SyncWarning {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+	// The whole point: one round trip, nothing polled, nothing downloaded.
+	if f.Submits() != 1 || f.Polls() != 0 || f.Downloads() != 0 || len(clock.sleeps) != 0 {
+		t.Fatalf("sync must be exactly one request: submits=%d polls=%d downloads=%d sleeps=%v",
+			f.Submits(), f.Polls(), f.Downloads(), clock.sleeps)
+	}
+	body := f.LastBody(t)
+	if body["wait"] != true || body["url"] != "https://example.com" || body["test"] != true {
+		t.Fatalf("unexpected body: %v", body)
+	}
+}
+
+func TestRenderSyncTimeoutIsTypedAndNeverRetried(t *testing.T) {
+	f := apitest.New(t)
+	f.SyncHandling = "timeout"
+	c, clock := newTestClient(t, f.URL)
+	var buf bytes.Buffer
+	res, err := c.RenderURLSync(context.Background(), "https://example.com", nil, &buf)
+	var st *SyncTimeoutError
+	if !errors.As(err, &st) || st.JobID != apitest.JobID || res.JobID != apitest.JobID {
+		t.Fatalf("expected a SyncTimeoutError naming the job, got %v (%+v)", err, res)
+	}
+	// The server cancelled the job and released the key — but auto-resending
+	// would start, and possibly time out, a whole new paid render.
+	if f.Submits() != 1 || len(clock.sleeps) != 0 {
+		t.Fatalf("a sync timeout must not be retried: submits=%d sleeps=%v", f.Submits(), clock.sleeps)
+	}
+	if !strings.Contains(err.Error(), "nothing was charged") || strings.Contains(err.Error(), "pdfik download") {
+		t.Fatalf("unexpected message: %v", err)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("nothing may be written on a timeout, got %q", buf.String())
+	}
+}
+
+func TestRenderSyncProxyTimeoutIsUnknownState(t *testing.T) {
+	// A bare 504 (ingress) or 524 (Cloudflare) without the API's problem body
+	// means the request died in transit: the job may have rendered and been
+	// charged, so the message must not promise otherwise.
+	for _, status := range []int{504, 524} {
+		var calls atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			calls.Add(1)
+			w.Header().Set("Content-Type", "text/html")
+			w.WriteHeader(status)
+			w.Write([]byte("<html><body>Gateway Time-out</body></html>"))
+		}))
+		c, clock := newTestClient(t, srv.URL)
+		var buf bytes.Buffer
+		_, err := c.RenderURLSync(context.Background(), "https://example.com", nil, &buf)
+		srv.Close()
+		if err == nil {
+			t.Fatalf("%d: expected an error", status)
+		}
+		var st *SyncTimeoutError
+		if errors.As(err, &st) {
+			t.Fatalf("%d: a proxy timeout must not read as the API's sync timeout: %v", status, err)
+		}
+		if !strings.Contains(err.Error(), "unknown") ||
+			strings.Contains(err.Error(), "nothing was charged") || strings.Contains(err.Error(), "not charged") {
+			t.Fatalf("%d: message must say the state is unknown and never claim a refund: %v", status, err)
+		}
+		if calls.Load() != 1 || len(clock.sleeps) != 0 {
+			t.Fatalf("%d: a proxy timeout must not be retried: calls=%d sleeps=%v", status, calls.Load(), clock.sleeps)
+		}
+	}
+}
+
+func TestRenderSyncWaitsOutAThrottleUnderOneKey(t *testing.T) {
+	f := apitest.New(t)
+	f.SubmitStatuses = []int{429}
+	c, clock := newTestClient(t, f.URL)
+	var buf bytes.Buffer
+	res, err := c.RenderHTMLSync(context.Background(), "<p>hi</p>", nil, &buf)
+	if err != nil || res.JobID != apitest.JobID || buf.String() != apitest.PDF {
+		t.Fatalf("a 429 rate limit must be waited out: %v (%+v)", err, res)
+	}
+	if f.Submits() != 2 {
+		t.Fatalf("expected 2 submits, got %d", f.Submits())
+	}
+	hs := f.SubmitHeaders()
+	if hs[0].Get("Idempotency-Key") == "" || hs[0].Get("Idempotency-Key") != hs[1].Get("Idempotency-Key") {
+		t.Fatalf("the throttled resend must reuse the idempotency key: %q vs %q",
+			hs[0].Get("Idempotency-Key"), hs[1].Get("Idempotency-Key"))
+	}
+	if len(clock.sleeps) != 1 || clock.sleeps[0] != 2*time.Second { // the fake sends Retry-After: 2
+		t.Fatalf("expected one 2s Retry-After sleep, got %v", clock.sleeps)
+	}
+}
+
+func TestRenderSyncAgainstAnOldServerNamesTheJob(t *testing.T) {
+	f := apitest.New(t)
+	f.SyncHandling = "ignored"
+	c, _ := newTestClient(t, f.URL)
+	var buf bytes.Buffer
+	res, err := c.RenderURLSync(context.Background(), "https://example.com", nil, &buf)
+	if err == nil {
+		t.Fatal("a 202 to a wait:true request must be an error")
+	}
+	for _, want := range []string{"predates sync mode", apitest.JobID, "pdfik download " + apitest.JobID, "without --sync"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("expected %q in: %v", want, err)
+		}
+	}
+	if res.JobID != apitest.JobID {
+		t.Fatalf("the created job's id must be reported: %+v", res)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("the 202 JSON must not land in the output: %q", buf.String())
+	}
+	if f.Submits() != 1 {
+		t.Fatalf("expected 1 submit, got %d", f.Submits())
+	}
+}
+
+func TestRenderSyncStallTriggersTheWatchdog(t *testing.T) {
+	f := apitest.New(t)
+	f.SyncHandling = "stall"
+	c, _ := newTestClient(t, f.URL, WithStallTimeout(200*time.Millisecond))
+	start := time.Now()
+	var buf bytes.Buffer
+	res, err := c.RenderURLSync(context.Background(), "https://example.com", nil, &buf)
+	var de *DownloadError
+	if !errors.As(err, &de) || !strings.Contains(err.Error(), "no data for 200ms") {
+		t.Fatalf("expected a stall DownloadError, got %v", err)
+	}
+	if de.JobID != apitest.JobID || res.JobID != apitest.JobID || res.Bytes != 4 {
+		t.Fatalf("unexpected stall details: %+v / %+v", de, res)
+	}
+	if time.Since(start) > 3*time.Second {
+		t.Fatalf("stall took %v to detect", time.Since(start))
+	}
+}
+
+func TestRenderSyncJobFailureIsARenderError(t *testing.T) {
+	f := apitest.New(t)
+	f.SyncHandling = "failed"
+	f.SyncErrorCode = "SSRF_BLOCKED"
+	c, _ := newTestClient(t, f.URL)
+	var buf bytes.Buffer
+	res, err := c.RenderURLSync(context.Background(), "https://example.com", nil, &buf)
+	var re *RenderError
+	if !errors.As(err, &re) || re.Code != "SSRF_BLOCKED" || re.JobID != apitest.JobID {
+		t.Fatalf("expected a RenderError SSRF_BLOCKED, got %v", err)
+	}
+	if res.JobID != apitest.JobID || buf.Len() != 0 || f.Submits() != 1 {
+		t.Fatalf("unexpected state: res=%+v buf=%q submits=%d", res, buf.String(), f.Submits())
+	}
+}
+
+func TestWithSyncHeaderTimeout(t *testing.T) {
+	f := apitest.New(t)
+	f.SyncHeaderDelay = 300 * time.Millisecond
+	c, _ := newTestClient(t, f.URL, WithSyncHeaderTimeout(50*time.Millisecond))
+	start := time.Now()
+	var buf bytes.Buffer
+	_, err := c.RenderURLSync(context.Background(), "https://example.com", nil, &buf)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "timeout") {
+		t.Fatalf("expected a header-timeout error, got %v", err)
+	}
+	if time.Since(start) > 3*time.Second {
+		t.Fatalf("header timeout took %v to fire", time.Since(start))
+	}
+
+	// Headers inside the window stream normally — the option bounds the wait
+	// for HEADERS, not the body.
+	f2 := apitest.New(t)
+	f2.SyncHeaderDelay = 100 * time.Millisecond
+	c2, _ := newTestClient(t, f2.URL, WithSyncHeaderTimeout(5*time.Second))
+	buf.Reset()
+	if _, err := c2.RenderHTMLSync(context.Background(), "<p>x</p>", nil, &buf); err != nil || buf.String() != apitest.PDF {
+		t.Fatalf("headers within the window must stream fine: %v %q", err, buf.String())
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 )
 
 // JobID is the id every submission gets.
@@ -46,6 +47,26 @@ type Server struct {
 	// per job kind ("" = application/pdf). "image/png" also switches the body
 	// to PNG — a screenshot job.
 	DownloadContentType string
+
+	// SyncHandling picks the answer to a wait:true submission, after any
+	// SubmitStatuses override (those model the gateway in front of the hold):
+	// "" streams the file (200 + X-PDFik-Job-Id), "timeout" the API's 503
+	// #sync-timeout problem, "failed" a 422 #job-failed problem carrying
+	// SyncErrorCode, "ignored" the plain async 202 of a server that predates
+	// sync mode, "stall" a 200 whose body stops after a few bytes.
+	SyncHandling string
+	// SyncErrorCode is the job error code of a "failed" answer (default
+	// PAGE_TIMEOUT).
+	SyncErrorCode string
+	// SyncWarning, when set, rides the 200 as X-PDFik-Warning (the e-invoice
+	// profile note travels there).
+	SyncWarning string
+	// SyncContentType is the 200's media type ("" = application/pdf;
+	// "image/png" also switches the body to PNG).
+	SyncContentType string
+	// SyncHeaderDelay postpones the whole 200 (headers included) — for
+	// exercising the sync client's response-header timeout.
+	SyncHeaderDelay time.Duration
 
 	srv       *httptest.Server
 	mu        sync.Mutex
@@ -115,8 +136,72 @@ func (f *Server) submit(w http.ResponseWriter, r *http.Request) {
 		problem(w, f.SubmitStatuses[n], "UPSTREAM", "submit failed")
 		return
 	}
+	if wait, _ := body["wait"].(bool); wait {
+		f.syncReply(w, r)
+		return
+	}
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]string{"job_id": JobID, "status": "queued", "detail": "Job queued"})
+}
+
+// syncReply answers a wait:true submission according to SyncHandling.
+func (f *Server) syncReply(w http.ResponseWriter, r *http.Request) {
+	switch f.SyncHandling {
+	case "ignored":
+		// A server that predates sync mode: `wait` is an unknown field and the
+		// ordinary async 202 comes back.
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(map[string]string{"job_id": JobID, "status": "queued", "detail": "Job queued"})
+	case "timeout":
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		json.NewEncoder(w).Encode(map[string]any{
+			"type":   "https://docs.pdfik.net/error-codes#sync-timeout",
+			"title":  "Service Unavailable - Render Did Not Finish In Time",
+			"status": http.StatusServiceUnavailable,
+			"error":  "SYNC_TIMEOUT",
+			"detail": "The render did not finish within 45 seconds. The job was cancelled and NOT charged, and its Idempotency-Key was released, so retrying is safe.",
+			"job_id": JobID,
+		})
+	case "failed":
+		code := f.SyncErrorCode
+		if code == "" {
+			code = "PAGE_TIMEOUT"
+		}
+		w.Header().Set("Content-Type", "application/problem+json")
+		w.WriteHeader(http.StatusUnprocessableEntity)
+		json.NewEncoder(w).Encode(map[string]any{
+			"type":   "https://docs.pdfik.net/error-codes#job-failed",
+			"title":  "Unprocessable Entity - Render Failed",
+			"status": http.StatusUnprocessableEntity,
+			"error":  code,
+			"detail": "The render failed with error code " + code + ".",
+			"job_id": JobID,
+		})
+	case "stall":
+		w.Header().Set("Content-Type", "application/pdf")
+		w.Header().Set("X-PDFik-Job-Id", JobID)
+		w.Write([]byte(PDF[:4]))
+		w.(http.Flusher).Flush()
+		<-r.Context().Done() // never send the rest
+	default: // the file
+		if f.SyncHeaderDelay > 0 {
+			time.Sleep(f.SyncHeaderDelay)
+		}
+		contentType, body := "application/pdf", PDF
+		if f.SyncContentType != "" {
+			contentType = f.SyncContentType
+		}
+		if contentType == "image/png" {
+			body = PNG
+		}
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("X-PDFik-Job-Id", JobID)
+		if f.SyncWarning != "" {
+			w.Header().Set("X-PDFik-Warning", f.SyncWarning)
+		}
+		w.Write([]byte(body))
+	}
 }
 
 func (f *Server) poll(w http.ResponseWriter, r *http.Request) {

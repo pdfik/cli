@@ -3,7 +3,9 @@
 //
 // Commands: url-to-pdf, html-to-pdf, markdown-to-pdf, url-to-image,
 // html-to-image, einvoice-to-pdf, wkhtmltopdf (compatibility mode), status,
-// download, version, help. Everything human-readable goes to stderr; stdout
+// download, version, help. The rendering commands queue a job, poll it and
+// download the result — or, with --sync, hold one request open and receive
+// the file straight back. Everything human-readable goes to stderr; stdout
 // carries only the rendered output (`-o -`) or the `status` line, so the tool
 // pipes cleanly.
 package main
@@ -28,6 +30,7 @@ const (
 	exitUsage        = 2   // invalid usage or a value refused before anything was submitted
 	exitRenderFailed = 3   // the job failed on the server; the error code was printed
 	exitNotFinished  = 4   // the job was not finished within --timeout; the job id was printed
+	exitSyncTimeout  = 5   // the --sync wait expired on the server: job cancelled, nothing charged
 	exitInterrupted  = 130 // SIGINT / SIGTERM
 )
 
@@ -122,6 +125,8 @@ func report(stderr io.Writer, prefix string, err error) int {
 		return exitRenderFailed
 	case errors.As(err, new(*api.NotFinishedError)):
 		return exitNotFinished
+	case errors.As(err, new(*api.SyncTimeoutError)):
+		return exitSyncTimeout
 	}
 	return exitFailure
 }
@@ -177,13 +182,19 @@ Flags:
                         presigned PUT URL (not for einvoice-to-pdf):
                         nothing is stored on PDFik's side, nothing is downloaded
                         — the destination you passed is printed instead
+      --sync            wait inside the request and receive the file straight
+                        back — no polling, no download step (the server holds
+                        it up to ~45 s; past that the job is cancelled, nothing
+                        is charged, and the CLI exits 5 — retrying is safe);
+                        not combinable with --deliver-url
       --profile NAME    einvoice-to-pdf: Factur-X profile the XML declares:
                         minimum, basicwl, basic, en16931 (default), extended
       --template ID     einvoice-to-pdf: id of a saved invoice template
                         (Dashboard → E-Invoice; default: the account default)
       --webhook URL     einvoice-to-pdf: callback URL POSTed when the job finishes
       --test            free test run: full pipeline, sample output, no quota used
-      --timeout DUR     how long to wait for rendering (default 3m; e.g. 90s)
+      --timeout DUR     how long to wait for rendering (default 3m; e.g. 90s);
+                        a --sync run is bounded by the server's window instead
   -q, --quiet           no progress lines (warnings and errors still print)
       --api-key KEY     API key; prefer $PDFIK_API_KEY — flag values are visible
                         to other local processes and shell history
@@ -198,7 +209,9 @@ Exit codes:
   0  PDF written        1  request, render or download failed (API, network, file)
   2  usage error        3  rendering failed on the server (error code printed)
   4  not finished within --timeout (job id printed — fetch it later with
-     'pdfik download <job-id>')                                   130  interrupted
+     'pdfik download <job-id>')
+  5  the --sync wait expired on the server (job cancelled, nothing charged —
+     retrying is safe)                                            130  interrupted
 
 Note: html-to-pdf and html-to-image input is sanitized by the API
 (styles/scripts stripped) — use url-to-pdf / url-to-image for styled pages.

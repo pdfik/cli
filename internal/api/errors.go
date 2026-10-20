@@ -21,6 +21,10 @@ type Error struct {
 	Code       string `json:"error"`
 	RetryAfter string `json:"-"`
 
+	// JobID is the extension member the sync-mode problems carry
+	// (#sync-timeout, #job-failed), so the failure can name its job.
+	JobID string `json:"job_id"`
+
 	// Detail is a string in every documented error; FastAPI validation errors
 	// (422) put a list of {loc, msg, type} here instead.
 	Detail any `json:"detail"`
@@ -175,10 +179,29 @@ func errorFrom(resp *http.Response) *Error {
 	apiErr.Title = SanitizeText(apiErr.Title)
 	apiErr.Code = SanitizeText(apiErr.Code)
 	apiErr.RetryAfter = SanitizeText(apiErr.RetryAfter)
+	apiErr.JobID = SanitizeText(apiErr.JobID)
+	if !ValidJobID(apiErr.JobID) {
+		apiErr.JobID = "" // ids end up in file names and command hints
+	}
 	if s, ok := apiErr.Detail.(string); ok {
 		apiErr.Detail = SanitizeText(s)
 	}
 	return apiErr
+}
+
+// SyncTimeoutError: the API's own answer to a wait:true request whose render
+// did not finish inside the server's sync window. The server cancelled the
+// job, refunded the quota unit and released the Idempotency-Key — which is
+// why this is typed: a proxy's bare HTML 504 proves none of that and must
+// never be reported with this message.
+type SyncTimeoutError struct{ JobID string }
+
+func (e *SyncTimeoutError) Error() string {
+	msg := "the render did not finish within the server's sync window — the job was cancelled and nothing was charged, so retrying is safe; for long renders rerun without --sync and let the normal polling flow wait"
+	if e.JobID != "" {
+		msg += " (job " + e.JobID + ")"
+	}
+	return msg
 }
 
 // RenderError: the job reached "failed" on the server. Code is the API's

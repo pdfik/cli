@@ -1,6 +1,6 @@
 # pdfik CLI
 
-> **Where this code lives:** developed in the PDFik platform monorepo; this tree is its commit `d46c696`.
+> **Where this code lives:** developed in the PDFik platform monorepo; this tree is its commit `a98b1e5`.
 > Issues and PRs are welcome here; accepted PRs are applied upstream and land with the next sync (see CONTRIBUTING.md).
 
 [![CI](https://github.com/pdfik/cli/actions/workflows/ci.yml/badge.svg)](https://github.com/pdfik/cli/actions/workflows/ci.yml)
@@ -27,9 +27,9 @@ use the CLI, and `--test` runs are free on every plan.
   chmod +x pdfik-linux-amd64 && sudo mv pdfik-linux-amd64 /usr/local/bin/pdfik
   ```
 - **Go 1.23 or newer:** `go install github.com/pdfik/cli/cmd/pdfik@latest`
-  (pin a version with `@v0.3.1`).
-- **Docker:** `docker pull ghcr.io/pdfik/cli:0.3.1` — linux/amd64 and linux/arm64;
-  `:0.3` and `:latest` track releases. How to run it (`--user`, mounting the
+  (pin a version with `@v0.4.0`).
+- **Docker:** `docker pull ghcr.io/pdfik/cli:0.4.0` — linux/amd64 and linux/arm64;
+  `:0.4` and `:latest` track releases. How to run it (`--user`, mounting the
   output directory) is in the [Dockerfile](Dockerfile), which also builds
   locally with `docker build -t pdfik .`.
 - **From source:** `go build -o pdfik ./cmd/pdfik`.
@@ -39,7 +39,8 @@ use the CLI, and `--test` runs are free on every plan.
 ```bash
 export PDFIK_API_KEY=sk_live_YOUR_API_KEY   # https://pdfik.net/dashboard/api-keys
 
-pdfik url-to-pdf https://example.com                            # saves ./<job-id>.pdf
+pdfik url-to-pdf https://example.com --sync                     # one request, the PDF streams straight back (~45 s ceiling)
+pdfik url-to-pdf https://example.com                            # async: queue → poll → download; saves ./<job-id>.pdf
 pdfik url-to-pdf https://example.com -o ./pdfs -f example.pdf   # -o directory, -f file name
 pdfik html-to-pdf invoice.html -f invoice.pdf --format A4 --margin 10mm --margin-top 25mm
 pdfik url-to-pdf https://example.com --test                     # free: full pipeline, sample PDF
@@ -89,6 +90,7 @@ page-layout flags apply to the three PDF page renderers (`url-to-pdf`,
 | `--quality N` | url-to-image, html-to-image | JPEG quality `1`–`100` (jpeg only) | renderer default |
 | `--viewport WxH` | url-to-image, html-to-image | the browser window the page opens in, in CSS pixels (`--viewport 1024x768`) — you pick the size and the API captures exactly that, nothing is scaled or fitted; width `320`–`1920`, height `320`–`8192`. Sets the image width, and without `--full-page` also its height | `1024x768` |
 | `--deliver-url URL` | url-to-pdf, html-to-pdf, markdown-to-pdf, url-to-image, html-to-image | upload the output straight to your own storage via this presigned PUT `https` URL. Nothing is stored on PDFik's side and nothing is downloaded — the CLI prints the destination you passed (query string stripped) instead of saving a file; the API itself never records it, so the `job.finished` webhook carries no address; not combinable with `-o`/`-f`. If the wait times out or is interrupted, the hint points at `pdfik status <job-id>` and the delivered URL — there is nothing to `pdfik download` | none |
+| `--sync` | rendering commands | hold the request until the render finishes and receive the file straight back — no polling, no download step. The server's ceiling is ~45 s: past it the job is cancelled, nothing is charged and the CLI exits `5` (retrying is safe; for longer renders drop `--sync`). Not combinable with `--deliver-url`; `--timeout` applies to the async wait only. Against a server that predates sync mode the CLI reports the created job id and says to rerun without `--sync` or fetch it with `pdfik download` | off |
 | `--profile NAME` | einvoice-to-pdf | Factur-X conformance profile the XML declares: `minimum`, `basicwl`, `basic`, `en16931`, `extended` | `en16931` |
 | `--template ID` | einvoice-to-pdf | id of a saved invoice template (Dashboard → E-Invoice) | the account default template |
 | `--webhook URL` | einvoice-to-pdf | callback URL that receives a POST with the job outcome | none |
@@ -146,6 +148,7 @@ Scripts can branch on these; they are also listed in `pdfik help`.
 | `2` | invalid usage, or a value refused before anything was submitted (nothing charged) |
 | `3` | rendering failed on the server; the error code is printed (see [error codes](https://docs.pdfik.net/error-codes)) |
 | `4` | the job was not finished within `--timeout`; the job id is printed — fetch it later with `pdfik download <job-id>` (named `<job-id>.pdf`, `.png` or `.jpg` after the job's output); for a `--deliver-url` run check it with `pdfik status <job-id>` — the output goes to your URL |
+| `5` | the `--sync` wait expired on the server: the job was cancelled and nothing was charged — retrying is safe; for renders this long drop `--sync` and use the async flow |
 | `130` | interrupted (Ctrl-C); any in-flight job keeps running on the server and its id is printed |
 
 ## wkhtmltopdf mode
@@ -170,6 +173,13 @@ wrappers expect. The complete tables are in [COMPATIBILITY.md](COMPATIBILITY.md)
 - **Polling respects the API's rate limits** (2 s → 10 s back-off, `Retry-After`
   honoured); a lost submit response is retried under one idempotency key, so a
   job is never created — or charged — twice.
+- **A `--sync` timeout is definitive, a proxy's is not.** The API's own sync
+  timeout (exit `5`) means the job was cancelled, nothing was charged and the
+  idempotency key was released — retrying is safe, and for renders that long
+  drop `--sync`. A bare HTML 504/524 from a proxy in between proves none of
+  that: the CLI then says the job's state is unknown so you can check the
+  dashboard before retrying. Rate-limit 429s are waited out mid-`--sync`
+  exactly like an async submit.
 - **The API key never leaves the API host:** it is stripped from cross-host
   redirects, never logged, and plain `http://` is refused unless you opt in.
 - Text that comes back from the network is stripped of terminal control

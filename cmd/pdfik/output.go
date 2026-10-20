@@ -27,10 +27,14 @@ var (
 // checkDestination settles where the output goes before anything is
 // submitted. With --deliver-url the server uploads the output straight to the
 // caller's own storage and nothing is downloaded, so a local destination is
-// refused rather than silently ignored.
-func checkDestination(deliverURL, dir, fileName string, stdout io.Writer) error {
+// refused rather than silently ignored — and so is --sync, whose whole point
+// is that the response carries the file.
+func checkDestination(deliverURL string, sync bool, dir, fileName string, stdout io.Writer) error {
 	if deliverURL == "" {
 		return checkOutput(dir, fileName, stdout)
+	}
+	if sync {
+		return usagef("--sync and --deliver-url cannot be combined — the sync response carries the file itself, while --deliver-url sends the output to your storage; drop one of them")
 	}
 	if dir != "" || fileName != "" {
 		return usagef("-o/--output and -f/--file-name cannot be combined with --deliver-url — the output is uploaded to your storage and nothing is downloaded")
@@ -144,33 +148,58 @@ func extForMedia(contentType string) string {
 // the extension then follows the download's Content-Type. `pdfik download`
 // cannot know the job's kind from its id, and naming a screenshot .pdf would
 // hand the user a file no viewer opens.
-//
-// File downloads stream into a temp file next to the destination and rename
-// over it only on success: a failed run can never truncate or delete a file
-// from an earlier run, an interrupted run leaves the previous file intact,
-// and the same-directory rename is atomic. The temp file is closed BEFORE
-// removal — Windows cannot delete an open file.
 func saveJob(ctx context.Context, client *api.Client, jobID, output, ext string, autoExt bool, stdout io.Writer) (string, error) {
-	if output == stdoutMarker {
+	// wkhtmltopdf mode passes its positional <output> straight here; an existing
+	// directory means "name the file after the job id inside it". "-" is the
+	// stdout marker, never a path to stat.
+	if output != stdoutMarker {
+		if fi, err := os.Stat(output); err == nil && fi.IsDir() {
+			output = filepath.Join(output, jobID+ext)
+			autoExt = true
+		}
+	}
+	return saveStream(output, func(contentType string) string {
+		if autoExt {
+			// The temp file stays where it is: same directory, so the rename
+			// in saveStream is still atomic.
+			if actual := extForMedia(contentType); actual != "" && actual != ext && strings.HasSuffix(output, ext) {
+				return strings.TrimSuffix(output, ext) + actual
+			}
+		}
+		return output
+	}, stdout, func(w io.Writer) (string, error) {
+		_, contentType, err := client.Download(ctx, jobID, w)
+		return contentType, err
+	})
+}
+
+// saveStream pulls one output stream through the temp-file + atomic-rename
+// machinery shared by downloads and --sync renders. anchor "-" streams to
+// stdout; otherwise the bytes land in a partial file next to anchor and only
+// a fully delivered stream is renamed to dest(contentType) — resolved after
+// the stream, because sync mode learns the default file name (the job id)
+// only from the response headers, and the autoExt rename needs the
+// Content-Type. A failed run can never truncate or delete a file from an
+// earlier run, an interrupted run leaves the previous file intact, and the
+// same-directory rename is atomic. The temp file is closed BEFORE removal —
+// Windows cannot delete an open file.
+func saveStream(anchor string, dest func(contentType string) string, stdout io.Writer,
+	fetch func(io.Writer) (contentType string, err error)) (string, error) {
+
+	if anchor == stdoutMarker {
 		if stdoutIsTerminal(stdout) { // backstop; checkOutput refused this before the submit
 			return "", usagef("refusing to write binary output to a terminal — redirect stdout or use -o DIR")
 		}
-		if _, _, err := client.Download(ctx, jobID, stdout); err != nil {
+		if _, err := fetch(stdout); err != nil {
 			return "", err
 		}
 		return stdoutMarker, nil
 	}
-	// wkhtmltopdf mode passes its positional <output> straight here; an existing
-	// directory means "name the file after the job id inside it".
-	if fi, err := os.Stat(output); err == nil && fi.IsDir() {
-		output = filepath.Join(output, jobID+ext)
-		autoExt = true
-	}
-	tmp, err := createPartial(output)
+	tmp, err := createPartial(anchor)
 	if err != nil {
 		return "", err
 	}
-	_, contentType, err := client.Download(ctx, jobID, tmp)
+	contentType, err := fetch(tmp)
 	if err != nil {
 		tmp.Close()
 		os.Remove(tmp.Name())
@@ -180,13 +209,7 @@ func saveJob(ctx context.Context, client *api.Client, jobID, output, ext string,
 		os.Remove(tmp.Name())
 		return "", err
 	}
-	if autoExt {
-		// The temp file stays where it is: same directory, so the rename below
-		// is still atomic.
-		if actual := extForMedia(contentType); actual != "" && actual != ext && strings.HasSuffix(output, ext) {
-			output = strings.TrimSuffix(output, ext) + actual
-		}
-	}
+	output := dest(contentType)
 	if err := renameFile(tmp.Name(), output); err != nil {
 		// Keep the temp file: the render is paid for and complete; only the
 		// final rename failed (target open in a viewer, permissions…).

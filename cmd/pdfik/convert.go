@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
@@ -20,6 +21,7 @@ type convertFlags struct {
 	output     string
 	fileName   string
 	deliverURL string
+	sync       bool
 	test       bool
 	quiet      bool
 	timeout    time.Duration
@@ -40,6 +42,7 @@ func parseConvertFlags(cmd string, args []string) (convertFlags, []string, error
 	}
 	fs.BoolVar(&cf.page.noBackground, "no-background", false, "")
 	fs.StringVar(&cf.deliverURL, "deliver-url", "", "")
+	fs.BoolVar(&cf.sync, "sync", false, "")
 	fs.BoolVar(&cf.test, "test", false, "")
 	fs.BoolVar(&cf.quiet, "q", false, "")
 	fs.BoolVar(&cf.quiet, "quiet", false, "")
@@ -100,15 +103,21 @@ func cmdConvert(ctx context.Context, cmd string, args []string, std streams) err
 	// Settle the destination before submitting: a bad -o/-f must not cost a
 	// render. Checks that cannot fail later come first, so a refused run never
 	// leaves a freshly created directory behind.
-	if err := checkDestination(cf.deliverURL, cf.output, cf.fileName, std.out); err != nil {
+	if err := checkDestination(cf.deliverURL, cf.sync, cf.output, cf.fileName, std.out); err != nil {
 		return err
 	}
 
 	var submit func(context.Context, *api.Client) (api.Job, error)
+	var sync syncFunc
 	switch cmd {
 	case "url-to-pdf":
 		submit = func(ctx context.Context, c *api.Client) (api.Job, error) {
 			return c.SubmitURL(ctx, input, body)
+		}
+		if cf.sync {
+			sync = func(ctx context.Context, c *api.Client, w io.Writer) (api.SyncResult, error) {
+				return c.RenderURLSync(ctx, input, body, w)
+			}
 		}
 	case "html-to-pdf":
 		progress(std.err, cf.quiet, "pdfik html-to-pdf: note: HTML input is sanitized by the API (styles/scripts stripped; relative assets unresolved) — url-to-pdf renders with full fidelity")
@@ -119,6 +128,11 @@ func cmdConvert(ctx context.Context, cmd string, args []string, std streams) err
 		submit = func(ctx context.Context, c *api.Client) (api.Job, error) {
 			return c.SubmitHTML(ctx, html, body)
 		}
+		if cf.sync {
+			sync = func(ctx context.Context, c *api.Client, w io.Writer) (api.SyncResult, error) {
+				return c.RenderHTMLSync(ctx, html, body, w)
+			}
+		}
 	}
 
 	client, err := cf.conn.newClient(std.err)
@@ -127,8 +141,12 @@ func cmdConvert(ctx context.Context, cmd string, args []string, std streams) err
 	}
 	return renderAndSave(ctx, client, submit, func(jobID string) string {
 		return outputPath(cf.output, cf.fileName, jobID, ".pdf")
-	}, runOptions{timeout: cf.timeout, quiet: cf.quiet, test: cf.test, deliverURL: cf.deliverURL}, std)
+	}, runOptions{timeout: cf.timeout, quiet: cf.quiet, test: cf.test, deliverURL: cf.deliverURL,
+		sync: sync, output: cf.output, fileName: cf.fileName}, std)
 }
+
+// syncFunc performs one wait-mode request, streaming the finished file into w.
+type syncFunc func(context.Context, *api.Client, io.Writer) (api.SyncResult, error)
 
 // runOptions are the knobs of the submit → wait → save pipeline.
 type runOptions struct {
@@ -142,6 +160,13 @@ type runOptions struct {
 	// the caller's storage: the download step is skipped entirely (the API
 	// answers 404 for such jobs) and the delivered location is reported.
 	deliverURL string
+	// sync, when set, switches the pipeline to the API's wait mode: one
+	// request that answers with the file itself — no polling, no download.
+	sync syncFunc
+	// output and fileName are the raw -o/-f values. The async path resolves
+	// them through outputFor up front; the sync path cannot — the default
+	// file name is the job id, which arrives only with the response headers.
+	output, fileName string
 }
 
 // renderAndSave is the one pipeline behind every rendering command and the
@@ -151,6 +176,9 @@ func renderAndSave(ctx context.Context, client *api.Client,
 	submit func(context.Context, *api.Client) (api.Job, error),
 	outputFor func(jobID string) string, opts runOptions, std streams) error {
 
+	if opts.sync != nil {
+		return renderSyncAndSave(ctx, client, opts, std)
+	}
 	ext := opts.ext
 	if ext == "" {
 		ext = ".pdf"
@@ -194,6 +222,87 @@ func renderAndSave(ctx context.Context, client *api.Client,
 		progress(std.err, opts.quiet, "saved %s%s", saved, savedSummary(st, saved, time.Since(started)))
 	}
 	return nil
+}
+
+// renderSyncAndSave is the pipeline's wait-mode branch: ONE request that
+// answers with the file itself — no "queued" line (there is no job id until
+// the response), no polling, no download step. The default file name IS the
+// job id, which arrives only with the response headers, so the bytes stream
+// into a partial file in the destination directory and the rename happens at
+// the end — the same never-truncate guarantee as a download.
+func renderSyncAndSave(ctx context.Context, client *api.Client, opts runOptions, std streams) error {
+	ext := opts.ext
+	if ext == "" {
+		ext = ".pdf"
+	}
+	suffix := ""
+	if opts.test {
+		sample := "PDF"
+		if ext != ".pdf" {
+			sample = "image"
+		}
+		suffix = " (test mode — free, returns a sample " + sample + ")"
+	}
+	progress(std.err, opts.quiet, "rendering, waiting for the file%s", suffix)
+
+	started := time.Now()
+	// The partial file is anchored next to the real destination ("output"
+	// stands in for the still-unknown job id), so the final rename stays
+	// same-directory and atomic.
+	anchor := outputPath(opts.output, opts.fileName, "output", ext)
+	var res api.SyncResult
+	saved, err := saveStream(anchor, func(string) string {
+		return outputPath(opts.output, opts.fileName, res.JobID, ext)
+	}, std.out, func(w io.Writer) (string, error) {
+		var err error
+		res, err = opts.sync(ctx, client, w)
+		return res.ContentType, err
+	})
+	if res.Warning != "" {
+		// The e-invoice profile note rides a response header in sync mode.
+		// Printed outside progress(): -q silences chatter, not diagnostics.
+		fmt.Fprintln(std.err, "pdfik: warning: "+res.Warning)
+	}
+	if err != nil {
+		return syncHint(err, res.JobID)
+	}
+	if saved != stdoutMarker {
+		progress(std.err, opts.quiet, "saved %s%s", saved, syncSummary(res, time.Since(started)))
+	}
+	return nil
+}
+
+// syncHint shapes a wait-mode failure. Before the response headers arrive
+// there is no job id — an interrupt hint must not invent one — and the
+// server's own sync timeout means the job no longer exists, so any
+// `pdfik download` advice would only 404.
+func syncHint(err error, jobID string) error {
+	var st *api.SyncTimeoutError
+	if errors.As(err, &st) {
+		return err // already says: cancelled, nothing charged, retry or drop --sync
+	}
+	if errors.Is(err, context.Canceled) {
+		if jobID == "" {
+			return fmt.Errorf("interrupted while waiting for the render — no job id had arrived yet; if the job was created it keeps running on the server and shows up in the dashboard's recent jobs (%w)", err)
+		}
+		// Headers arrived, so the render finished; the file stays
+		// downloadable for the normal 24 h.
+		return fmt.Errorf("interrupted — job %s already finished on the server; fetch it with: pdfik download %s (%w)", jobID, jobID, err)
+	}
+	if jobID != "" && !strings.Contains(err.Error(), jobID) {
+		return fmt.Errorf("%w (job %s)", err, jobID)
+	}
+	return err
+}
+
+// syncSummary is savedSummary's sibling for wait-mode runs: there is no
+// JobStatus to quote, only what came back with the file.
+func syncSummary(res api.SyncResult, wall time.Duration) string {
+	parts := []string{"job " + res.JobID, api.HumanBytes(res.Bytes)}
+	if wall > 0 {
+		parts = append(parts, "total "+wall.Round(100*time.Millisecond).String())
+	}
+	return " — " + strings.Join(parts, ", ")
 }
 
 // withJobHint makes sure every failure after the submit names the job — under

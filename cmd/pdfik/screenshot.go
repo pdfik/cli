@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +31,7 @@ type screenshotFlags struct {
 	quality    string
 	viewport   string
 	deliverURL string
+	sync       bool
 	test       bool
 	quiet      bool
 	timeout    time.Duration
@@ -47,6 +49,7 @@ func parseScreenshotFlags(cmd string, args []string) (screenshotFlags, []string,
 	fs.StringVar(&sf.quality, "quality", "", "")
 	fs.StringVar(&sf.viewport, "viewport", "", "")
 	fs.StringVar(&sf.deliverURL, "deliver-url", "", "")
+	fs.BoolVar(&sf.sync, "sync", false, "")
 	fs.BoolVar(&sf.test, "test", false, "")
 	fs.BoolVar(&sf.quiet, "q", false, "")
 	fs.BoolVar(&sf.quiet, "quiet", false, "")
@@ -162,15 +165,21 @@ func cmdScreenshot(ctx context.Context, cmd string, args []string, std streams) 
 
 	// Settle the destination before submitting: a bad -o/-f must not cost a
 	// render.
-	if err := checkDestination(sf.deliverURL, sf.output, sf.fileName, std.out); err != nil {
+	if err := checkDestination(sf.deliverURL, sf.sync, sf.output, sf.fileName, std.out); err != nil {
 		return err
 	}
 
 	var submit func(context.Context, *api.Client) (api.Job, error)
+	var sync syncFunc
 	switch cmd {
 	case "url-to-image":
 		submit = func(ctx context.Context, c *api.Client) (api.Job, error) {
 			return c.SubmitURLImage(ctx, input, body)
+		}
+		if sf.sync {
+			sync = func(ctx context.Context, c *api.Client, w io.Writer) (api.SyncResult, error) {
+				return c.RenderURLImageSync(ctx, input, body, w)
+			}
 		}
 	case "html-to-image":
 		progress(std.err, sf.quiet, "pdfik html-to-image: note: HTML input is sanitized by the API (styles/scripts stripped; relative assets unresolved) — url-to-image renders with full fidelity")
@@ -181,6 +190,11 @@ func cmdScreenshot(ctx context.Context, cmd string, args []string, std streams) 
 		submit = func(ctx context.Context, c *api.Client) (api.Job, error) {
 			return c.SubmitHTMLImage(ctx, html, body)
 		}
+		if sf.sync {
+			sync = func(ctx context.Context, c *api.Client, w io.Writer) (api.SyncResult, error) {
+				return c.RenderHTMLImageSync(ctx, html, body, w)
+			}
+		}
 	}
 
 	client, err := sf.conn.newClient(std.err)
@@ -189,5 +203,6 @@ func cmdScreenshot(ctx context.Context, cmd string, args []string, std streams) 
 	}
 	return renderAndSave(ctx, client, submit, func(jobID string) string {
 		return outputPath(sf.output, sf.fileName, jobID, ext)
-	}, runOptions{timeout: sf.timeout, quiet: sf.quiet, test: sf.test, ext: ext, deliverURL: sf.deliverURL}, std)
+	}, runOptions{timeout: sf.timeout, quiet: sf.quiet, test: sf.test, ext: ext, deliverURL: sf.deliverURL,
+		sync: sync, output: sf.output, fileName: sf.fileName}, std)
 }
