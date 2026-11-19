@@ -3,7 +3,7 @@
 //
 // Commands: url-to-pdf, html-to-pdf, markdown-to-pdf, url-to-image,
 // html-to-image, einvoice-to-pdf, wkhtmltopdf (compatibility mode), status,
-// download, version, help. The rendering commands queue a job, poll it and
+// download, account, version, help. The rendering commands queue a job, poll it and
 // download the result — or, with --sync, hold one request open and receive
 // the file straight back. Everything human-readable goes to stderr; stdout
 // carries only the rendered output (`-o -`) or the `status` line, so the tool
@@ -76,6 +76,8 @@ func run(ctx context.Context, args []string, std streams) int {
 		err = cmdStatus(ctx, rest, std)
 	case "download":
 		err = cmdDownload(ctx, rest, std)
+	case "account":
+		err = cmdAccount(ctx, rest, std)
 	case "version", "--version", "-v":
 		fmt.Fprintln(std.out, "pdfik "+effectiveVersion())
 		return exitOK
@@ -153,6 +155,7 @@ Usage:
   pdfik wkhtmltopdf [wkhtmltopdf-flags] <input> <output>
   pdfik download    <job-id>         [flags]
   pdfik status      <job-id>
+  pdfik account                      plan, quota window, usage and limits of the key
   pdfik version
 
 Flags:

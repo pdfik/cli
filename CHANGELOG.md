@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] — 2026-11-19
+
+### Added
+- `pdfik account`: the key's plan, current quota window, usage in it and limits
+  (`GET /account`), one `name: value` line each on stdout. Creates no job and
+  charges nothing — a quick way to check a key.
+- Every request sends `X-PDFik-Client: cli/<version>` so usage can be attributed
+  to the CLI.
+
 ## [0.4.0] — 2026-10-20
 
 ### Added
@@ -142,6 +151,7 @@ First public release.
 - Static binaries for Linux/macOS/Windows with a checksums file, and a
   `FROM scratch` non-root container image.
 
+[0.5.0]: https://github.com/pdfik/cli/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/pdfik/cli/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/pdfik/cli/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/pdfik/cli/compare/v0.2.0...v0.3.0

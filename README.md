@@ -1,6 +1,6 @@
 # pdfik CLI
 
-> **Where this code lives:** developed in the PDFik platform monorepo; this tree is its commit `a98b1e5`.
+> **Where this code lives:** developed in the PDFik platform monorepo; this tree is its commit `dc07845`.
 > Issues and PRs are welcome here; accepted PRs are applied upstream and land with the next sync (see CONTRIBUTING.md).
 
 [![CI](https://github.com/pdfik/cli/actions/workflows/ci.yml/badge.svg)](https://github.com/pdfik/cli/actions/workflows/ci.yml)
@@ -51,6 +51,7 @@ pdfik url-to-pdf https://example.com --deliver-url "$PRESIGNED_PUT_URL"  # strai
 pdfik einvoice-to-pdf invoice.xml --profile en16931             # Factur-X e-invoice (PDF/A-3)
 pdfik status   <job-id>
 pdfik download <job-id> -o ./pdfs                               # fetch a finished job later (.pdf/.png/.jpg)
+pdfik account                                                   # plan, quota window, usage and limits of the key
 ```
 
 **`html-to-pdf` / `html-to-image` input is sanitized by the API** (`<style>`,
@@ -156,7 +157,7 @@ Scripts can branch on these; they are also listed in `pdfik help`.
 ```bash
 alias wkhtmltopdf='pdfik wkhtmltopdf'
 wkhtmltopdf -s A4 -O Landscape --footer-center 'Page [page] of [topage]' https://example.com out.pdf
-wkhtmltopdf --username user --password pass https://example.com report.pdf   # Pro+
+wkhtmltopdf --username user --password pass https://example.com report.pdf
 ```
 
 Every wkhtmltopdf flag is either mapped to the API, accepted with a warning

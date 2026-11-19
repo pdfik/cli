@@ -234,7 +234,7 @@ func wkFlagDefs() []wkFlagDef {
 			if err != nil || ms < 0 || ms > 10000 {
 				return usagef("--javascript-delay %q is outside the 0–10000 ms range", v[0])
 			}
-			st.render["wait_after_load_ms"] = ms // render options are Pro+ (see COMPATIBILITY.md)
+			st.render["wait_after_load_ms"] = ms
 			return nil
 		})},
 		{[]string{"--username"}, mapped(1, func(st *wkState, v []string) error { st.authUser = &v[0]; return nil })},
@@ -244,7 +244,7 @@ func wkFlagDefs() []wkFlagDef {
 			if err != nil || q < 1 || q > 100 {
 				return usagef("--image-quality %q is outside the 1–100 range", v[0])
 			}
-			st.options["compression"] = map[string]any{"image_quality": q} // Pro+ (see COMPATIBILITY.md)
+			st.options["compression"] = map[string]any{"image_quality": q}
 			return nil
 		})},
 		{[]string{"--header-left"}, headerFooterText(header, "left")},
@@ -303,7 +303,7 @@ func wkFlagDefs() []wkFlagDef {
 		{[]string{"--enable-local-file-access", "--disable-local-file-access"}, ignorable(0, "the HTML file itself is read locally; its relative assets are NOT — see COMPATIBILITY.md")},
 		{[]string{"-d", "--dpi"}, ignorable(1, "PDF output is vector; DPI does not apply")},
 		{[]string{"--image-dpi"}, ignorable(1, "image DPI is controlled by the source page")},
-		{[]string{"-l", "--lowquality"}, ignorable(0, "use --image-quality N for lossy compression (Pro+)")},
+		{[]string{"-l", "--lowquality"}, ignorable(0, "use --image-quality N for lossy compression")},
 		{[]string{"--header-spacing", "--footer-spacing"}, ignorable(1, "the gap between header/footer and body cannot be adjusted; layout may differ slightly")},
 		{[]string{"--copies"}, ignorable(1, "copies only matter when printing on paper")},
 		{[]string{"--collate", "--no-collate"}, ignorable(0, "collation only matters when printing on paper")},

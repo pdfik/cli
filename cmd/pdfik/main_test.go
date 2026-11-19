@@ -746,3 +746,47 @@ func TestExitCodesAreDocumented(t *testing.T) {
 		}
 	}
 }
+
+func TestAccountPrintsPlanUsageAndLimits(t *testing.T) {
+	f := apitest.New(t)
+	name := "Production"
+	f.AccountKeyName = &name
+	r := execute(t, f, nil, "account")
+	if r.code != exitOK {
+		t.Fatalf("exit %d: %s", r.code, r.stderr)
+	}
+	for _, want := range []string{
+		"plan: pro\n",
+		"key: Production\n",
+		"window: 2026-11-05T00:00:00Z - 2026-12-05T00:00:00Z\n",
+		"documents: 1234 / 50000\n",
+		"bytes: 52428800 / 53687091200\n",
+		"requests per minute: 500\n",
+		"test mode: 60 per minute, 2000 per day\n",
+	} {
+		mustContain(t, r.stdout, want)
+	}
+	if f.Submits() != 0 {
+		t.Fatal("account must not create a job")
+	}
+	if got := f.AllHeaders()[0].Get("X-PDFik-Client"); !strings.HasPrefix(got, "cli/") {
+		t.Fatalf("X-PDFik-Client = %q", got)
+	}
+}
+
+func TestAccountWithoutKeyNameAndWithExtraArgs(t *testing.T) {
+	f := apitest.New(t)
+	r := execute(t, f, nil, "account")
+	if r.code != exitOK {
+		t.Fatalf("exit %d: %s", r.code, r.stderr)
+	}
+	mustContain(t, r.stdout, "key: (no name)\n")
+	if r := execute(t, f, nil, "account", "extra"); r.code != exitUsage {
+		t.Fatalf("an argument must be a usage error, got %d", r.code)
+	}
+}
+
+func TestAccountIsInTheHelp(t *testing.T) {
+	r := execute(t, nil, nil, "help")
+	mustContain(t, r.stdout, "pdfik account")
+}

@@ -33,15 +33,12 @@ anything is submitted, so a bad invocation never costs a render.
 | `--default-header` | `[webpage]` left, `[page]/[topage]` right, with a line |
 | `--replace` | `--replace name value` substitutes `[name]` in headers and footers |
 | `--title` | feeds `[title]`/`[doctitle]`; the PDF metadata title is not set (warned) |
-| `--javascript-delay` | 0–10000 ms · Pro+ |
-| `--username`, `--password` | basic auth for URL input · Pro+ |
-| `--image-quality` | 1–100 · Pro+ |
+| `--javascript-delay` | 0–10000 ms |
+| `--username`, `--password` | basic auth for URL input |
+| `--image-quality` | 1–100 |
 | `--encoding` | UTF-8 spellings accepted; anything else is refused (re-encode the file first) |
 | `--load-error-handling`, `--load-media-error-handling` | `ignore`/`skip` is this pipeline's behaviour (failed subresources render missing; a main document that fails still fails the job); `abort` is refused |
 | `-q`, `--quiet` | no progress lines; warnings still print |
-
-"Pro+" means the option needs the Pro plan or higher; on other plans the API
-answers 402 before anything is rendered.
 
 ## Accepted with a warning
 

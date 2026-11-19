@@ -107,7 +107,10 @@ func (c connFlags) newClient(stderr io.Writer) (*api.Client, error) {
 	if base == "" {
 		base = os.Getenv("PDFIK_API_URL")
 	}
-	opts := append([]api.Option{api.WithUserAgent("pdfik-cli/" + effectiveVersion())}, extraClientOptions...)
+	opts := append([]api.Option{
+		api.WithUserAgent("pdfik-cli/" + effectiveVersion()),
+		api.WithClientHeader("cli/" + effectiveVersion()),
+	}, extraClientOptions...)
 	if host, plain := api.PlainHTTPHost(base); plain && os.Getenv("PDFIK_INSECURE_HTTP") == "1" {
 		opts = append(opts, api.WithInsecureHTTP())
 		fmt.Fprintf(stderr, "pdfik: warning: sending the API key over plain http to %s (PDFIK_INSECURE_HTTP=1)\n", host)

@@ -949,3 +949,60 @@ func TestWithSyncHeaderTimeout(t *testing.T) {
 		t.Fatalf("headers within the window must stream fine: %v %q", err, buf.String())
 	}
 }
+
+func TestGetAccountParsesTheAccountAndWaitsOutAThrottle(t *testing.T) {
+	f := apitest.New(t)
+	f.AccountStatuses = []int{429, 200}
+	c, clock := newTestClient(t, f.URL)
+
+	acc, err := c.GetAccount(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.Accounts() != 2 || len(clock.sleeps) != 1 {
+		t.Fatalf("one throttle wait expected: accounts=%d sleeps=%v", f.Accounts(), clock.sleeps)
+	}
+	if acc.Plan != "pro" || acc.Window.End != "2026-12-05T00:00:00Z" ||
+		acc.Usage.Documents == nil || *acc.Usage.Documents != 1234 ||
+		acc.Limits.Documents == nil || *acc.Limits.Documents != 50000 ||
+		acc.Limits.Bytes == nil || *acc.Limits.Bytes != 53687091200 || acc.Limits.RequestsPerMinute != 500 ||
+		acc.TestMode.PerDay != 2000 || acc.Key.Name != nil {
+		t.Fatalf("unexpected account: %+v", acc)
+	}
+}
+
+func TestEveryRequestCarriesTheClientHeader(t *testing.T) {
+	f := apitest.New(t)
+	c, _ := newTestClient(t, f.URL, WithClientHeader("cli/9.9.9"))
+	ctx := context.Background()
+	if _, err := c.GetAccount(ctx); err != nil {
+		t.Fatal(err)
+	}
+	job, err := c.SubmitURL(ctx, "https://example.com", Submission{"test": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Status(ctx, job.JobID); err != nil {
+		t.Fatal(err)
+	}
+	headers := f.AllHeaders()
+	if len(headers) < 3 {
+		t.Fatalf("expected at least 3 requests, got %d", len(headers))
+	}
+	for i, h := range headers {
+		if got := h.Get("X-PDFik-Client"); got != "cli/9.9.9" {
+			t.Fatalf("request %d: X-PDFik-Client = %q", i, got)
+		}
+	}
+}
+
+func TestTheClientHeaderDefaultsToCli(t *testing.T) {
+	f := apitest.New(t)
+	c, _ := newTestClient(t, f.URL)
+	if _, err := c.GetAccount(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := f.AllHeaders()[0].Get("X-PDFik-Client"); got != "cli" {
+		t.Fatalf("X-PDFik-Client = %q", got)
+	}
+}

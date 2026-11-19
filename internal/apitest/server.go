@@ -67,6 +67,11 @@ type Server struct {
 	// SyncHeaderDelay postpones the whole 200 (headers included) — for
 	// exercising the sync client's response-header timeout.
 	SyncHeaderDelay time.Duration
+	// AccountStatuses overrides the HTTP status of successive GET /account
+	// calls (200 = the normal answer); a non-200 is sent with Retry-After: 1.
+	AccountStatuses []int
+	// AccountKeyName is the key name GET /account reports (nil = null).
+	AccountKeyName *string
 
 	srv       *httptest.Server
 	mu        sync.Mutex
@@ -75,6 +80,9 @@ type Server struct {
 	polls     int
 	submits   int
 	downloads int
+	accounts  int
+	// every request's headers, in arrival order
+	allHeaders []http.Header
 }
 
 // New starts a fake API and closes it when the test ends.
@@ -90,10 +98,16 @@ func New(t testing.TB) *Server {
 	mux.HandleFunc("POST /einvoice-to-pdf", f.submit)
 	mux.HandleFunc("GET /jobs/"+JobID, f.poll)
 	mux.HandleFunc("GET /jobs/"+JobID+"/download", f.download)
+	mux.HandleFunc("GET /account", f.account)
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		problem(w, http.StatusNotFound, "JOB_NOT_FOUND", "Job not found")
 	})
-	f.srv = httptest.NewServer(mux)
+	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.allHeaders = append(f.allHeaders, r.Header.Clone())
+		f.mu.Unlock()
+		mux.ServeHTTP(w, r)
+	}))
 	f.URL = f.srv.URL
 	t.Cleanup(f.srv.Close)
 	return f
@@ -284,3 +298,42 @@ func (f *Server) Polls() int { f.mu.Lock(); defer f.mu.Unlock(); return f.polls 
 
 // Downloads is the number of download requests received.
 func (f *Server) Downloads() int { f.mu.Lock(); defer f.mu.Unlock(); return f.downloads }
+
+// account answers GET /account with a fixed Pro account.
+func (f *Server) account(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("X-API-Key") == "" {
+		problem(w, http.StatusUnauthorized, "MISSING_API_KEY", "Not authenticated")
+		return
+	}
+	f.mu.Lock()
+	n := f.accounts
+	f.accounts++
+	f.mu.Unlock()
+	if n < len(f.AccountStatuses) && f.AccountStatuses[n] != http.StatusOK {
+		w.Header().Set("Retry-After", "1")
+		problem(w, f.AccountStatuses[n], "RATE_LIMIT_EXCEEDED", "Too many requests")
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{
+		"plan":   "pro",
+		"window": map[string]any{"start": "2026-11-05T00:00:00Z", "end": "2026-12-05T00:00:00Z"},
+		"usage":  map[string]any{"documents": 1234, "bytes": 52428800},
+		"limits": map[string]any{
+			"documents": 50000, "bytes": int64(53687091200), "requests_per_minute": 500,
+			"concurrent_jobs": 50, "max_file_size_bytes": 157286400,
+		},
+		"test_mode": map[string]any{"per_minute": 60, "per_day": 2000},
+		"key":       map[string]any{"name": f.AccountKeyName},
+	})
+}
+
+// Accounts is the number of GET /account requests received.
+func (f *Server) Accounts() int { f.mu.Lock(); defer f.mu.Unlock(); return f.accounts }
+
+// AllHeaders returns the headers of every request received, in order.
+func (f *Server) AllHeaders() []http.Header {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]http.Header(nil), f.allHeaders...)
+}

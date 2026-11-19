@@ -95,6 +95,7 @@ type Client struct {
 	baseURL           string
 	apiKey            string
 	userAgent         string
+	clientHeader      string
 	insecureHTTP      bool
 	stallTimeout      time.Duration
 	requestTimeout    time.Duration
@@ -123,6 +124,10 @@ type Option func(*Client)
 
 // WithUserAgent sets the User-Agent header (the CLI reports its version).
 func WithUserAgent(ua string) Option { return func(c *Client) { c.userAgent = ua } }
+
+// WithClientHeader sets X-PDFik-Client, which tells the API which client sent a
+// request (the CLI sends "cli/<version>"; the server reduces it to a closed set).
+func WithClientHeader(v string) Option { return func(c *Client) { c.clientHeader = v } }
 
 // WithInsecureHTTP allows a plain-http base URL on a non-loopback host. The
 // caller is expected to warn the user; the client itself never prints.
@@ -163,6 +168,7 @@ func New(baseURL, apiKey string, opts ...Option) (*Client, error) {
 		baseURL:           strings.TrimRight(baseURL, "/"),
 		apiKey:            apiKey,
 		userAgent:         "pdfik-cli",
+		clientHeader:      "cli",
 		stallTimeout:      defaultStallTimeout,
 		requestTimeout:    requestTimeout,
 		syncHeaderTimeout: syncResponseHeaderTimeout,
@@ -660,6 +666,64 @@ func (c *Client) StatusPatient(ctx context.Context, jobID string) (JobStatus, er
 	}
 }
 
+// Account is GET /account: the key's plan, current quota window, usage in it
+// and limits. Documents limits of 0/absent mean unlimited (JSON null).
+type Account struct {
+	Plan   string `json:"plan"`
+	Window struct {
+		Start string `json:"start"`
+		End   string `json:"end"`
+	} `json:"window"`
+	Usage struct {
+		Documents *int64 `json:"documents"`
+		Bytes     int64  `json:"bytes"`
+	} `json:"usage"`
+	Limits struct {
+		Documents         *int64 `json:"documents"`
+		Bytes             *int64 `json:"bytes"`
+		RequestsPerMinute int64  `json:"requests_per_minute"`
+		ConcurrentJobs    int64  `json:"concurrent_jobs"`
+		MaxFileSizeBytes  int64  `json:"max_file_size_bytes"`
+	} `json:"limits"`
+	TestMode struct {
+		PerMinute int64 `json:"per_minute"`
+		PerDay    int64 `json:"per_day"`
+	} `json:"test_mode"`
+	Key struct {
+		Name *string `json:"name"`
+	} `json:"key"`
+}
+
+// GetAccount fetches the account once; a throttle (429 rate or concurrency
+// limit) is waited out with Retry-After, like StatusPatient. Creates no job and
+// charges nothing.
+func (c *Client) GetAccount(ctx context.Context) (Account, error) {
+	for waits := 0; ; waits++ {
+		var acc Account
+		req, err := c.newRequest(ctx, http.MethodGet, "/account", nil)
+		if err != nil {
+			return acc, err
+		}
+		err = c.do(req, http.StatusOK, &acc)
+		if err == nil {
+			acc.Plan = SanitizeText(acc.Plan)
+			acc.Window.Start = SanitizeText(acc.Window.Start)
+			acc.Window.End = SanitizeText(acc.Window.End)
+			if acc.Key.Name != nil {
+				name := SanitizeText(*acc.Key.Name)
+				acc.Key.Name = &name
+			}
+			return acc, nil
+		}
+		if !isThrottled(err) || waits >= throttleWaits || ctx.Err() != nil {
+			return acc, err
+		}
+		if err := c.sleep(ctx, throttleDelay(err, c.now)); err != nil {
+			return acc, err
+		}
+	}
+}
+
 // Status fetches the job state once.
 func (c *Client) Status(ctx context.Context, jobID string) (JobStatus, error) {
 	var st JobStatus
@@ -883,6 +947,7 @@ func (c *Client) newRequest(ctx context.Context, method, path string, body io.Re
 	}
 	req.Header.Set("X-API-Key", c.apiKey)
 	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("X-PDFik-Client", c.clientHeader)
 	req.Header.Set("Accept", "application/json, application/pdf, image/png, image/jpeg")
 	return req, nil
 }
